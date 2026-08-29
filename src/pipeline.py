@@ -5,10 +5,11 @@ reconstruct_scan() — self-contained, per-scan reconstruction with physics-info
 preprocessing stack.
 
 Improvements over baseline:
-1. Snellius-Corrected Delay: Replaces unstable 3-layer bent-ray for homogeneous phantoms.
-2. Effective Velocity: Calculates v_tissue per-scan based on fat/fib fraction.
-3. Bandpass Filtering: Restricts signal to 4-6 GHz (Isabel Olaya Lopez, 2024) for optimal contrast.
-4. Depth Gain Compensation: Equalizes signal strength across depth to aid deep-tumor detection.
+1. Complex Calibration (Division by Empty Chamber) per Isabel Olaya Lopez Eq. (1).
+2. Snellius-Corrected Bistatic Delay: Precise geometry for 60-degree separation.
+3. Effective Velocity: Calculates v_tissue per-scan based on fat/fib fraction.
+4. Bandpass Filtering: Restricts signal to 4-6 GHz for optimal dielectric contrast.
+5. Depth Gain Compensation: Equalizes signal strength across depth.
 """
 
 from time import perf_counter
@@ -24,7 +25,6 @@ DEFAULT_GRID_MARGIN_FACTOR = 1.5
 DEFAULT_GRID_STEP_MM = 1.0
 
 # Delay grids depend only on phantom-level geometry. 
-# Caching by phantom identity avoids recomputing an identical delay grid ~15x over.
 _DELAY_CACHE = {}
 
 def _delay_cache_key(phant_id, use_snellius, ant_rad_mm, breast_radius_mm,
@@ -42,7 +42,7 @@ def build_grid(breast_radius_mm, margin_factor=DEFAULT_GRID_MARGIN_FACTOR,
     return grid_x_mm, grid_y_mm, axis_mm, grid_radius_mm
 
 
-def reconstruct_scan(scan_idx, s21, tumor_model, freq_axis=None,
+def reconstruct_scan(scan_idx, s21, tumor_model, id_to_original_idx, freq_axis=None,
                       beamformer="das", use_snellius=True, use_cf=True,
                       use_tvsvd=False, use_bandpass=True, use_depth_gain=True,
                       shell_center=(0.0, 0.0),
@@ -51,22 +51,6 @@ def reconstruct_scan(scan_idx, s21, tumor_model, freq_axis=None,
                       return_diagnostics=False):
     """
     Fully self-contained per-scan reconstruction with improved physics pipeline.
-
-    Parameters
-    ----------
-    scan_idx : int, row index into tumor_model / first axis of s21
-    s21 : complex128 array (n_scans, n_freq, n_ant)
-    tumor_model : DataFrame from data_loading.build_tumor_model()
-    freq_axis : array-like, frequency points in Hz (required for bandpass)
-    beamformer : 'das' | 'dmas'
-    use_snellius : bool — Use Snellius-corrected straight ray vs legacy two_medium
-    use_cf : bool — coherence-factor weighting on/off
-    use_tvsvd : bool — hybrid TVSVD clutter suppression on/off
-    use_bandpass : bool — Apply 4-6 GHz filter (Isabel Olaya Lopez recommendation)
-    use_depth_gain : bool — Apply exponential gain to compensate for attenuation
-    shell_center : (x_mm, y_mm) offset of the phantom shell from chamber origin
-
-    Returns a dict with images, peak location, GT, and all metrics.
     """
     t_start = perf_counter()
 
@@ -84,20 +68,31 @@ def reconstruct_scan(scan_idx, s21, tumor_model, freq_axis=None,
     geom = physics.get_antenna_geometry(ant_rad_mm)
 
     # ---- Signal Pre-processing ----
-    fd_scan = s21[scan_idx]  # (n_freq, n_ant)
+    # Get raw scan index
+    s21_idx = int(row["original_s21_idx"])
+    fd_raw = s21[s21_idx]
     
-    # A. Bandpass Filter (4-6 GHz) to isolate dielectric contrast
+    # A. COMPLEX CALIBRATION (CRITICAL FIX)
+    # Get empty chamber reference index
+    emp_ref_id = row.get("emp_ref_id", None)
+    if emp_ref_id is not None and not np.isnan(emp_ref_id):
+        emp_idx = id_to_original_idx.get(int(emp_ref_id), None)
+        if emp_idx is not None:
+            fd_empty = s21[emp_idx]
+            fd_scan = sp.calibrate_s_parameters(fd_raw, fd_empty)
+        else:
+            fd_scan = fd_raw # Fallback if ref missing
+    else:
+        fd_scan = fd_raw
+
+    # B. Bandpass Filter (4-6 GHz)
     if use_bandpass and freq_axis is not None:
         fd_scan = sp.apply_bandpass_filter(fd_scan, freq_axis, low_cut=4e9, high_cut=6e9)
 
-    # B. Time Domain Transform
+    # C. Time Domain Transform
     time_signal = sp.to_time_domain(fd_scan)
     time_axis = sp.get_time_axis(time_signal.shape[0])
 
-    # C. Depth Gain Compensation (Equalize signal strength across depth)
-    # Note: We need a rough delay estimate for gain. We'll use a placeholder 
-    # or compute it after grid generation. For now, we apply it post-grid.
-    
     # ---- Clutter Suppression (Optional) ----
     if use_tvsvd:
         time_signal_filtered, n_removed = sp.apply_hybrid_tvsvd(time_signal)
@@ -110,7 +105,7 @@ def reconstruct_scan(scan_idx, s21, tumor_model, freq_axis=None,
     grid_x_m, grid_y_m = grid_x_mm.ravel() / 1000.0, grid_y_mm.ravel() / 1000.0
     shell_center_m = (shell_center[0] / 1000.0, shell_center[1] / 1000.0)
 
-    # ---- Delay Grid Calculation (Snellius Corrected) ----
+    # ---- Delay Grid Calculation (Snellius Bistatic Precise) ----
     cache_key = _delay_cache_key(
         row["phant_id"], use_snellius, ant_rad_mm, breast_radius_mm, 
         v_tissue, margin_factor, grid_step_mm, shell_center
@@ -120,30 +115,27 @@ def reconstruct_scan(scan_idx, s21, tumor_model, freq_axis=None,
         delay_grid = _DELAY_CACHE[cache_key]
     else:
         if use_snellius:
-            # Use our new robust model for homogeneous phantoms
-            delay_grid = physics.snellius_corrected_delay(
+            # USE THE NEW PRECISE BISTATIC FUNCTION
+            delay_grid = physics.snellius_bistatic_delay_precise(
                 geom["ant_x"], geom["ant_y"], 
+                geom["ant_x_b"], geom["ant_y_b"], # Pass Rx positions!
                 grid_x_m, grid_y_m,
                 breast_radius_mm / 1000.0, v_tissue
             )
         else:
-            # Fallback to legacy two-medium model if needed for comparison
+            # Fallback to legacy two-medium model
             delay_grid = physics.two_medium_delay(
                 geom["ant_x"], geom["ant_y"], geom["ant_x_b"], geom["ant_y_b"],
                 grid_x_m, grid_y_m,
                 breast_radius_mm / 1000.0, v_tissue, shell_center=shell_center_m,
             )
         
+        # Reshape once for caching and usage
         delay_grid = delay_grid.reshape(-1, *grid_x_mm.shape)
         _DELAY_CACHE[cache_key] = delay_grid
 
-    # D. Apply Depth Gain AFTER delay grid is ready (for accurate distance estimation)
-        # ... setelah delay_grid dihitung ...
-    delay_grid = delay_grid.reshape(-1, *grid_x_mm.shape) # Menjadi (n_ant, ny, nx)
-
-    # 4. DEPTH GAIN COMPENSATION
+    # D. Apply Depth Gain AFTER delay grid is ready
     if use_depth_gain:
-        # Teruskan delay_grid yang sudah direshape, fungsi apply_depth_gain akan handle flattening
         time_signal_filtered = sp.apply_depth_gain(time_signal_filtered, delay_grid)
     
     # ---- Beamforming ----
@@ -161,7 +153,7 @@ def reconstruct_scan(scan_idx, s21, tumor_model, freq_axis=None,
             img = bf.dmas(td_mag, time_axis, delay_grid)
             cf_map = None
     else:
-        raise ValueError(f"Unknown beamformer: {beamformer!r} (expected 'das' or 'dmas')")
+        raise ValueError(f"Unknown beamformer: {beamformer!r}")
 
     # ---- Blob Extraction + Localization ----
     blob = bd.extract_blob_candidate(img, axis_mm, axis_mm)

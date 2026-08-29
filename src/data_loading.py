@@ -1,19 +1,12 @@
 """
 src/data_loading.py
 
-Loads the UM-BMID Gen-2 S21 dataset, metadata, and Ursula's phantom_database.csv,
+Loads the UM-BMID Gen-2 S21 dataset, metadata, and phantom_database.csv,
 merges them, and backfills any phantom missing from the CSV using Aurel's
-hardcoded real-measurement tables (from the phantomInfo/phantomBIRADS source
-tables) rather than dropping those scans.
+hardcoded real-measurement tables.
 
-Also converts Ursula's density_class column ("C1".."C4") into an integer
-BI-RADS category (1-4) for stratified analysis.
-
-Usage:
-    from src.data_loading import load_all_data
-    d = load_all_data()
-    d['s21']            # complex128 array (n_scans, n_freq, 72)
-    d['tumor_model']     # DataFrame, one row per usable tumor-bearing scan
+Key Improvement: Ensures robust mapping between Scan IDs (for calibration)
+and Array Indices (for processing).
 """
 
 import re
@@ -34,10 +27,7 @@ EPS_FAT = 7.0    # glycerin mixture (adipose-mimicking)
 EPS_FIB = 45.0   # Triton X-100 mixture (fibroglandular-mimicking)
 
 # ============================================================================
-# Aurel's real-measurement fallback tables (phantomInfo / phantomBIRADS
-# source tables). Used ONLY when a phantom is missing from Ursula's
-# phantom_database.csv, so we don't silently drop scans that the CSV's
-# cleaning step happened to filter out.
+# Aurel's real-measurement fallback tables
 # ============================================================================
 ADIPOSE_SHELL_RADIUS_ANTENNA_PLANE_MM = {
     'A1': 22.9, 'A2': 48.5, 'A3': 56.9, 'A11': 33.1, 'A12': 39.0,
@@ -98,14 +88,7 @@ def load_metadata(path=META_PATH):
     metadata = pd.read_pickle(path)
     metadata = pd.DataFrame(metadata).copy()
 
-    # Stamp each row's position in the RAW, unfiltered array BEFORE any
-    # filtering or reset_index happens. This is a data column, not the
-    # DataFrame's index, so it survives every downstream filter/reset and
-    # lets later code correctly index into s21 (whose row order matches
-    # this raw, unfiltered order) even after rows have been dropped and
-    # the DataFrame's own index has been reset. Without this, scan_idx
-    # positions in the filtered/merged DataFrame silently stop
-    # corresponding to the same position in s21.
+    # Stamp each row's position in the RAW, unfiltered array
     metadata["original_s21_idx"] = np.arange(len(metadata))
 
     metadata["phant_id"] = metadata["phant_id"].astype(str).str.strip()
@@ -115,14 +98,14 @@ def load_metadata(path=META_PATH):
 
 def build_id_to_original_idx(path=META_PATH):
     """
-    {id: original_s21_idx} for ALL 1301 raw rows, including empty-chamber
-    reference scans that load_metadata() filters out (phant_id == "").
-    Needed for empty-chamber calibration subtraction, since a scan's
-    emp_ref_id points at one of those filtered-out rows — load_metadata()'s
-    output alone can't resolve it.
+    Creates a mapping: {scan_id: original_array_index}.
+    This is CRITICAL for calibration because emp_ref_id in metadata is an ID,
+    not an array index.
     """
     raw = pd.read_pickle(path)
     raw = pd.DataFrame(raw)
+    # Ensure 'id' is treated as integer for consistent lookup
+    raw["id"] = raw["id"].astype(int)
     return dict(zip(raw["id"], np.arange(len(raw))))
 
 
@@ -132,13 +115,8 @@ def load_phantom_db(path=PHANTOM_CSV_PATH):
 
 def merge_and_backfill(metadata, phantom_db):
     """
-    Merge metadata with phantom_database.csv (Ursula's source, preferred),
-    then backfill any row where the CSV merge produced NaN shell_radius /
-    fib_volume using Aurel's hardcoded real-measurement tables, keyed off
-    the adipose ID parsed from phant_id.
-
-    Returns the merged DataFrame with columns renamed for downstream use:
-    breast_radius_mm, tumor_radius_mm, tumor_x_mm, tumor_y_mm, birads.
+    Merge metadata with phantom_database.csv and backfill missing values.
+    Calculates fat/fib fractions and effective velocity for physics modeling.
     """
     merged = metadata.merge(
         phantom_db, left_on="phant_id", right_on="phantom_id", how="left"
@@ -165,22 +143,24 @@ def merge_and_backfill(metadata, phantom_db):
     n_missing_after = merged["shell_radius"].isna().sum()
     if n_missing_before > 0:
         print(f"[data_loading] backfill recovered {n_missing_before - n_missing_after} "
-              f"rows; {n_missing_after} still unmatched (will be dropped downstream).")
+              f"rows; {n_missing_after} still unmatched.")
 
-    # tissue fractions + effective permittivity
+    # Calculate tissue fractions and effective permittivity
     merged["fat_volume"] = merged["shell_volume"] - merged["fib_volume"]
     merged["fat_fraction"] = merged["fat_volume"] / merged["shell_volume"]
     merged["fib_fraction"] = merged["fib_volume"] / merged["shell_volume"]
+    
+    # Effective permittivity and velocity
     merged["eps_eff"] = merged["fat_fraction"] * EPS_FAT + merged["fib_fraction"] * EPS_FIB
     merged["wave_velocity"] = C_LIGHT / np.sqrt(merged["eps_eff"])
 
-    # BI-RADS from density_class ("C1".."C4" -> 1..4)
+    # BI-RADS conversion
     if "density_class" in merged.columns:
         merged["birads"] = merged["density_class"].apply(_density_class_to_birads)
     else:
         merged["birads"] = np.nan
 
-    # rename for downstream consistency
+    # Rename for downstream consistency
     merged = merged.rename(columns={
         "shell_radius": "breast_radius_mm",
         "tum_rad": "tumor_radius_mm",
@@ -188,8 +168,7 @@ def merge_and_backfill(metadata, phantom_db):
         "tum_y": "tumor_y_mm",
     })
 
-    # unit check: UM-BMID tumor radii are 5/10/15/20mm. If max < 2.0, values
-    # are actually in cm and need scaling.
+    # Unit check: convert cm to mm if necessary
     if merged["tumor_radius_mm"].notna().any() and merged["tumor_radius_mm"].max() < 2.0:
         print("[data_loading] tumor columns detected in cm -> converting to mm")
         merged["tumor_radius_mm"] *= 10.0
@@ -212,11 +191,12 @@ def build_tumor_model(physical_model):
 
 
 def load_all_data(s21_path=S21_PATH, meta_path=META_PATH, csv_path=PHANTOM_CSV_PATH):
-    """One-call load + merge + backfill + filter. Returns a dict of everything
-    downstream modules need."""
+    """One-call load + merge + backfill + filter."""
     s21 = load_s21(s21_path)
     metadata = load_metadata(meta_path)
     phantom_db = load_phantom_db(csv_path)
+    
+    # Build the ID-to-Index map for calibration
     id_to_original_idx = build_id_to_original_idx(meta_path)
 
     physical_model = merge_and_backfill(metadata, phantom_db)
@@ -226,10 +206,7 @@ def load_all_data(s21_path=S21_PATH, meta_path=META_PATH, csv_path=PHANTOM_CSV_P
 
     print(f"[data_loading] s21 scans: {s21.shape[0]}  |  "
           f"tumor_model rows: {len(tumor_model)}  |  usable range: 0..{n_valid - 1}")
-    if "birads" in tumor_model.columns:
-        counts = tumor_model["birads"].value_counts().sort_index()
-        print(f"[data_loading] BI-RADS distribution among usable tumor scans:\n{counts}")
-
+    
     return dict(
         s21=s21,
         metadata=metadata,

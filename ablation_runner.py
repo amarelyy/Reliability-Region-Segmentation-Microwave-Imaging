@@ -35,10 +35,12 @@ VARIANTS = [
     dict(name="Full_Stack_DMAS",          beamformer="dmas",use_snellius=True, use_cf=True,  use_bandpass=True,  use_depth_gain=True),
 ]
 
-def _run_one(idx, variant, s21, tumor_model):
+def _run_one(idx, variant, s21, tumor_model, id_to_original_idx):
     try:
         r = reconstruct_scan(
-            idx, s21, tumor_model, freq_axis=freq_axis,
+            idx, s21, tumor_model, 
+            id_to_original_idx=id_to_original_idx, # FIX: Added this critical parameter
+            freq_axis=freq_axis,
             beamformer=variant["beamformer"],
             use_snellius=variant["use_snellius"],
             use_cf=variant["use_cf"],
@@ -50,9 +52,9 @@ def _run_one(idx, variant, s21, tumor_model):
     except Exception as e:
         return ("fail", idx, str(e))
 
-def run_variant(variant, s21, tumor_model, n_scans, n_jobs=1):
+def run_variant(variant, s21, tumor_model, id_to_original_idx, n_scans, n_jobs=1):
     outcomes = Parallel(n_jobs=n_jobs, verbose=5)(
-        delayed(_run_one)(idx, variant, s21, tumor_model) for idx in range(n_scans)
+        delayed(_run_one)(idx, variant, s21, tumor_model, id_to_original_idx) for idx in range(n_scans)
     )
     rows = [r for status, idx, r in outcomes if status == "ok"]
     failed = [(idx, r) for status, idx, r in outcomes if status == "fail"]
@@ -70,13 +72,15 @@ def main():
     print("Loading data...")
     d = load_all_data()
     s21, tumor_model = d["s21"], d["tumor_model"]
+    id_to_original_idx = d["id_to_original_idx"] # FIX: Extract this from data dict
+    
     n_scans = args.n_scans or d["n_valid_scans"]
     print(f"Running improved physics ablation on {n_scans} scans.\n")
 
     summary_rows = []
     for variant in VARIANTS:
         print(f"Running variant: {variant['name']}")
-        df, failed = run_variant(variant, s21, tumor_model, n_scans, n_jobs=args.n_jobs)
+        df, failed = run_variant(variant, s21, tumor_model, id_to_original_idx, n_scans, n_jobs=args.n_jobs)
 
         if failed:
             print(f"  {len(failed)} scans failed (e.g. {failed[0]})")

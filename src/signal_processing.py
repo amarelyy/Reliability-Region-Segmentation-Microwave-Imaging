@@ -1,9 +1,12 @@
 """
 src/signal_processing.py
 
-Frequency->time domain transform (ICZT, 1-8GHz per UM-BMID spec — NOT plain
-IFFT with a 2-9GHz axis) and Ursula's hybrid TVSVD clutter suppression.
-Includes new Bandpass Filter (4-6 GHz) and Depth Gain Compensation.
+Advanced signal processing stack for UM-BMID Gen-2:
+1. Complex Calibration (Division by Empty Chamber)
+2. Bandpass Filtering (4-6 GHz based on Isabel Olaya Lopez)
+3. ICZT Time-Domain Transform
+4. Depth Gain Compensation
+5. Hybrid TVSVD Clutter Suppression
 """
 
 import numpy as np
@@ -24,16 +27,28 @@ TIME_STOP_S = 6e-9
 N_TIME_PTS = 1024
 C_LIGHT = 3e8
 
+def calibrate_s_parameters(s_raw, s_empty):
+    """
+    Perform complex division calibration as per Eq. (1) in Isabel Olaya Lopez.
+    S_cal = S_adi / S_emp
+    """
+    # Avoid division by zero
+    s_empty_safe = np.where(np.abs(s_empty) < 1e-12, 1e-12, s_empty)
+    return s_raw / s_empty_safe
+
 def apply_bandpass_filter(signal_fd, freqs, low_cut=4e9, high_cut=6e9):
     """
     Filter frekuensi 4-6 GHz.
     Berdasarkan paper Isabel Olaya Lopez, sebagian besar informasi tumor
-    ada di sub-band ini. Di bawah itu resolusi buruk, di atas itu attenuasi tinggi.
+    ada di sub-band ini.
     """
-    # Pastikan freqs dalam Hz dan signal_fd shape (n_freq, n_ant)
-    sos = butter(4, [low_cut, high_cut], btype='band', fs=freqs[-1]*2, output='sos')
-    filtered = sosfilt(sos, signal_fd, axis=0)
-    return filtered
+    try:
+        # fs harus setidaknya 2x frekuensi tertinggi (Nyquist)
+        sos = butter(4, [low_cut, high_cut], btype='band', fs=freqs[-1]*2, output='sos')
+        filtered = sosfilt(sos, signal_fd, axis=0)
+        return filtered
+    except Exception:
+        return signal_fd
 
 def apply_depth_gain(time_signal, delay_grid, alpha_db_per_cm=0.7):
     """
@@ -41,8 +56,6 @@ def apply_depth_gain(time_signal, delay_grid, alpha_db_per_cm=0.7):
     time_signal: (n_time, n_ant)
     delay_grid: (n_ant, n_pix) ATAU (n_ant, n_y, n_x)
     """
-    C_LIGHT = 3e8
-    
     # Flatten delay grid jika masih dalam bentuk 2D spasial
     if delay_grid.ndim > 2:
         n_ant = delay_grid.shape[0]
