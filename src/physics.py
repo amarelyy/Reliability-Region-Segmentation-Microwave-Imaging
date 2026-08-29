@@ -1,16 +1,3 @@
-"""
-src/physics.py
-
-Antenna geometry + two delay models:
-  - two_medium_delay: Aurel's air + adaptive-tissue-velocity model (line-circle
-    intersection), used as the ablation baseline.
-  - bent_ray_3layer_delay: Ursula's air -> skin -> interior Fermat-principle
-    solver, used as the proposed model.
-
-Both take the same (antenna_xy, pixel_grid) inputs and return a delay grid in
-seconds, so pipeline.py can swap between them with one flag.
-"""
-
 import numpy as np
 
 C_LIGHT = 3e8
@@ -20,108 +7,126 @@ V_AIR = C_LIGHT / np.sqrt(EPSILON_AIR)   # ~299.9 mm/ns
 N_ANT = 72
 SEPARATION_DEG = 60.0
 
-
-# ============================================================================
-# Antenna geometry
-# ============================================================================
-def get_corrected_ant_radius_m(raw_rad_mm):
-    """Rodriguez-Herrera (2016) antenna radius correction. Input mm, output metres."""
-    return (0.97 * (raw_rad_mm - 0.106) + 0.148) / 1000.0
-
-def get_antenna_geometry(ant_rad_mm, n_ant=N_ANT, separation_deg=SEPARATION_DEG,
-                          apply_correction=True):
-    """
-    Per-scan antenna positions (both ports) from a raw ant_rad metadata value
-    (mm, already converted from the metadata's native cm). Applies the
-    Rodriguez-Herrera correction by default.
-
-    Returns dict: ant_x, ant_y, ant_x_b, ant_y_b (arrays, length n_ant, metres),
-    tx_idx, rx_idx (channel-mapping indices).
-    """
-    ant_rad_m = get_corrected_ant_radius_m(ant_rad_mm) if apply_correction else ant_rad_mm / 1000.0
-
-    angles = np.linspace(0, -2 * np.pi, n_ant, endpoint=False)
-    ant_x = ant_rad_m * np.cos(angles)
-    ant_y = ant_rad_m * np.sin(angles)
-
-    offset = np.deg2rad(separation_deg)
-    ant_x_b = ant_rad_m * np.cos(angles + offset)
-    ant_y_b = ant_rad_m * np.sin(angles + offset)
-
-    sep_steps = int(round(separation_deg / 360.0 * n_ant))
-    tx_idx = np.arange(n_ant)
-    rx_idx = (np.arange(n_ant) + sep_steps) % n_ant
-
-    return dict(ant_x=ant_x, ant_y=ant_y, ant_x_b=ant_x_b, ant_y_b=ant_y_b,
-                tx_idx=tx_idx, rx_idx=rx_idx, ant_rad_m=ant_rad_m)
-
 def compute_effective_velocity(fat_frac, fib_frac, eps_fat=7.0, eps_fib=45.0):
-    """
-    Menghitung kecepatan efektif berdasarkan komposisi phantom (UM-BMID metadata).
-    Ini menggantikan asumsi kecepatan tunggal yang kaku.
-    """
+    """Hitung kecepatan efektif berdasarkan komposisi phantom."""
     eps_eff = fat_frac * eps_fat + fib_frac * eps_fib
     v_eff = C_LIGHT / np.sqrt(eps_eff)
     return v_eff, eps_eff
 
-def snellius_bistatic_delay(ant_x, ant_y, ant_x_b, ant_y_b, grid_x_m, grid_y_m, 
-                            breast_radius_m, v_tissue, v_air=C_LIGHT):
+def get_corrected_ant_radius_m(raw_rad_mm):
+    """Rodriguez-Herrera (2016) antenna radius correction. Input mm, output metres."""
+    return (0.97 * (raw_rad_mm - 0.106) + 0.148) / 1000.0
+
+def get_antenna_geometry(ant_rad_mm, n_ant=N_ANT, separation_deg=SEPARATION_DEG, apply_correction=True):
+    ant_rad_m = get_corrected_ant_radius_m(ant_rad_mm) if apply_correction else ant_rad_mm / 1000.0
+    angles = np.linspace(0, -2 * np.pi, n_ant, endpoint=False)
+    ant_x = ant_rad_m * np.cos(angles)
+    ant_y = ant_rad_m * np.sin(angles)
+    offset = np.deg2rad(separation_deg)
+    ant_x_b = ant_rad_m * np.cos(angles + offset)
+    ant_y_b = ant_rad_m * np.sin(angles + offset)
+    sep_steps = int(round(separation_deg / 360.0 * n_ant))
+    tx_idx = np.arange(n_ant)
+    rx_idx = (np.arange(n_ant) + sep_steps) % n_ant
+    return dict(ant_x=ant_x, ant_y=ant_y, ant_x_b=ant_x_b, ant_y_b=ant_y_b,
+                tx_idx=tx_idx, rx_idx=rx_idx, ant_rad_m=ant_rad_m)
+
+def snellius_bistatic_delay_precise(ant_x, ant_y, ant_x_b, ant_y_b, grid_x_m, grid_y_m, 
+                                    breast_radius_m, v_tissue, v_air=C_LIGHT):
     """
-    Menghitung delay bistatic (Tx->Grid->Rx) dengan koreksi Snellius sederhana.
-    Untuk phantom homogen, kita gunakan pendekatan straight-ray dengan effective velocity
-    di dalam medium, tapi tetap memperhitungkan dua titik antena yang berbeda.
+    Menghitung delay bistatic (Tx->Grid->Rx) dengan koreksi Snellius presisi.
+    Menggunakan line-circle intersection analitik untuk menentukan panjang jalur di Udara vs Tissue.
     """
     n_ant = len(ant_x)
     n_pix = len(grid_x_m)
     delay_grid = np.zeros((n_ant, n_pix))
     
-    # Posisi antena Tx dan Rx
-    tx_pos = np.stack([ant_x, ant_y], axis=1)
-    rx_pos = np.stack([ant_x_b, ant_y_b], axis=1)
-    grid_pos = np.stack([grid_x_m, grid_y_m], axis=1)
+    tx_pos = np.stack([ant_x, ant_y], axis=1) # (72, 2)
+    rx_pos = np.stack([ant_x_b, ant_y_b], axis=1) # (72, 2)
+    grid_pos = np.stack([grid_x_m, grid_y_m], axis=1) # (N_pix, 2)
+    
+    R = breast_radius_m
     
     for i in range(n_ant):
         tx = tx_pos[i]
         rx = rx_pos[i]
         
-        # Jarak Tx ke setiap titik grid
-        dist_tx = np.linalg.norm(grid_pos - tx, axis=1)
-        # Jarak Rx ke setiap titik grid
-        dist_rx = np.linalg.norm(grid_pos - rx, axis=1)
+        # --- LEG 1: Tx -> Grid Point ---
+        # Vector from Tx to Grid
+        vec_tx = grid_pos - tx # (N_pix, 2)
+        dist_tx_total = np.linalg.norm(vec_tx, axis=1)
         
-        # Cek apakah titik grid ada di dalam phantom (radius breast_radius_m)
-        dist_grid_center = np.linalg.norm(grid_pos, axis=1)
-        inside_phantom = dist_grid_center <= breast_radius_m
+        # Line-Circle Intersection for Tx leg
+        # P(t) = Tx + t * vec_tx. Find t where |P(t)| = R
+        a1 = np.sum(vec_tx**2, axis=1)
+        b1 = 2 * np.sum(tx * vec_tx, axis=1)
+        c1 = np.sum(tx**2) - R**2
+        disc1 = b1**2 - 4*a1*c1
         
-        # Hitung delay:
-        # 1. Di Udara (jarak antena ke permukaan phantom)
-        # 2. Di Tissue (jarak di dalam phantom)
-        # Simplifikasi: Kita anggap jalur lurus, tapi kecepatannya berubah saat masuk lingkaran.
-        # Untuk presisi tinggi, kita butuh titik potong garis Tx-Grid dengan lingkaran.
+        # Default: all air (if miss or inside)
+        dist_air_tx = dist_tx_total
+        dist_tissue_tx = 0.0
         
-        # Titik potong Tx -> Grid
-        # ... (Logika intersection yang kompleks disederhanakan untuk stabilitas awal) ...
-        # Kita gunakan weighted average velocity berdasarkan seberapa jauh grid di dalam lingkaran
+        valid1 = disc1 >= 0
+        if np.any(valid1):
+            # Take the smallest positive t (entry point)
+            sqrt_disc1 = np.sqrt(np.maximum(disc1[valid1], 0))
+            t1 = (-b1[valid1] - sqrt_disc1) / (2*a1[valid1])
+            t2 = (-b1[valid1] + sqrt_disc1) / (2*a1[valid1])
+            
+            # Entry is the first intersection
+            t_entry = np.where(t1 > 1e-6, t1, t2)
+            
+            # If grid is inside phantom, t_entry will be < 1
+            # Distance in air = t_entry * total_dist
+            # Distance in tissue = (1 - t_entry) * total_dist
+            
+            is_inside = t_entry < 1.0
+            idx_inside = np.where(valid1)[0][is_inside]
+            idx_outside = np.where(valid1)[0][~is_inside]
+            
+            if len(idx_inside) > 0:
+                t_val = t_entry[is_inside]
+                dist_air_tx[idx_inside] = t_val * dist_tx_total[idx_inside]
+                dist_tissue_tx[idx_inside] = (1 - t_val) * dist_tx_total[idx_inside]
+                
+            # For points outside phantom but line intersects circle (grazing or through)
+            # We assume straight line path for simplicity in this 'precise' model 
+            # unless we want to implement full refraction angle calculation which is very heavy.
+            # However, for UM-BMID, most grids are INSIDE.
+            
+        # --- LEG 2: Grid Point -> Rx ---
+        vec_rx = rx - grid_pos # (N_pix, 2)
+        dist_rx_total = np.linalg.norm(vec_rx, axis=1)
         
-        # Pendekatan Robust untuk Smoke Test:
-        # Delay = (Jarak Total di Udara / V_AIR) + (Jarak Total di Tissue / V_TISSUE)
-        # Kita estimasi jarak di tissue sebagai chord length jika garis memotong lingkaran.
+        a2 = np.sum(vec_rx**2, axis=1)
+        b2 = 2 * np.sum(grid_pos * vec_rx, axis=1)
+        c2 = np.sum(grid_pos**2) - R**2
+        disc2 = b2**2 - 4*a2*c2
         
-        # Untuk saat ini, mari gunakan model Two-Medium yang sudah terbukti jalan di repo asli
-        # tapi dengan v_tissue yang sudah dikalibrasi (Effective Velocity).
-        # Model Bent-Ray/Snellius penuh butuh iterasi per-pixel yang sangat berat dan rawan bug
-        # jika koordinatnya tidak sempurna dalam meter.
+        dist_air_rx = dist_rx_total
+        dist_tissue_rx = 0.0
         
-        # KITA GUNAKAN INI DULU UNTUK MEMASTIKAN DASARNYA BENAR:
-        delay_grid[i] = (dist_tx + dist_rx) / v_air 
-        
-        # Koreksi sederhana: Jika grid di dalam phantom, kurangi delay udara dan tambah delay tissue
-        # Ini adalah aproksimasi linear yang lebih stabil daripada Snellius iteratif untuk saat ini
-        mask = inside_phantom
-        if np.any(mask):
-            # Estimasi kasar jarak di dalam tissue (bisa diperbaiki dengan line-circle intersection)
-            # Untuk sekarang, kita beri bobot v_tissue pada seluruh jalur jika target di dalam
-            # Ini akan membuat fokus lebih tajam daripada murni v_air
-            delay_grid[i, mask] = (dist_tx[mask] + dist_rx[mask]) / v_tissue
+        valid2 = disc2 >= 0
+        if np.any(valid2):
+            sqrt_disc2 = np.sqrt(np.maximum(disc2[valid2], 0))
+            t1_2 = (-b2[valid2] - sqrt_disc2) / (2*a2[valid2])
+            t2_2 = (-b2[valid2] + sqrt_disc2) / (2*a2[valid2])
+            
+            # Exit point is the first intersection from grid towards rx
+            t_exit = np.where(t1_2 > 1e-6, t1_2, t2_2)
+            
+            is_inside_2 = t_exit < 1.0
+            idx_inside_2 = np.where(valid2)[0][is_inside_2]
+            
+            if len(idx_inside_2) > 0:
+                t_val_2 = t_exit[is_inside_2]
+                dist_tissue_rx[idx_inside_2] = t_val_2 * dist_rx_total[idx_inside_2]
+                dist_air_rx[idx_inside_2] = (1 - t_val_2) * dist_rx_total[idx_inside_2]
+
+        # --- TOTAL DELAY ---
+        # Time = (Dist_Air / V_AIR) + (Dist_Tissue / V_TISSUE)
+        delay_grid[i] = (dist_air_tx + dist_air_rx) / v_air + \
+                        (dist_tissue_tx + dist_tissue_rx) / v_tissue
 
     return delay_grid
