@@ -2,18 +2,12 @@
 src/pipeline.py
 
 reconstruct_scan() — self-contained, per-scan reconstruction with physics-informed
-preprocessing stack.
-
-Improvements over baseline:
-1. Complex Calibration (Division by Empty Chamber) per Isabel Olaya Lopez Eq. (1).
-2. Snellius-Corrected Bistatic Delay: Precise geometry for 60-degree separation.
-3. Effective Velocity: Calculates v_tissue per-scan based on fat/fib fraction.
-4. Bandpass Filtering: Restricts signal to 4-6 GHz for optimal dielectric contrast.
-5. Depth Gain Compensation: Equalizes signal strength across depth.
+preprocessing stack, strictly following Isabel Olaya Lopez (2024) calibration protocol.
 """
 
 from time import perf_counter
 import numpy as np
+import pandas as pd
 
 from . import physics
 from . import signal_processing as sp
@@ -24,12 +18,10 @@ from . import metrics as mx
 DEFAULT_GRID_MARGIN_FACTOR = 1.5
 DEFAULT_GRID_STEP_MM = 1.0
 
-# Delay grids depend only on phantom-level geometry. 
 _DELAY_CACHE = {}
 
 def _delay_cache_key(phant_id, use_snellius, ant_rad_mm, breast_radius_mm,
                       v_tissue, margin_factor, grid_step_mm, shell_center):
-    """Generate a unique key for caching delay grids."""
     return (phant_id, use_snellius, round(ant_rad_mm, 3), round(breast_radius_mm, 3),
             round(v_tissue, 3), margin_factor, grid_step_mm, shell_center)
 
@@ -50,10 +42,9 @@ def reconstruct_scan(scan_idx, s21, tumor_model, id_to_original_idx, freq_axis=N
                       grid_step_mm=DEFAULT_GRID_STEP_MM,
                       return_diagnostics=False):
     """
-    Fully self-contained per-scan reconstruction with improved physics pipeline.
+    Fully self-contained per-scan reconstruction.
     """
     t_start = perf_counter()
-
     row = tumor_model.iloc[scan_idx]
     breast_radius_mm = float(row["breast_radius_mm"])
     
@@ -62,50 +53,60 @@ def reconstruct_scan(scan_idx, s21, tumor_model, id_to_original_idx, freq_axis=N
     fib_frac = float(row["fib_fraction"])
     v_tissue, eps_tissue = physics.compute_effective_velocity(fat_frac, fib_frac)
 
-    # Antenna geometry setup
+    # 2. Antenna geometry setup
     ant_rad_cm = float(row.get("ant_rad", 21.5))
     ant_rad_mm = ant_rad_cm * 10.0
     geom = physics.get_antenna_geometry(ant_rad_mm)
 
-    # ---- Signal Pre-processing ----
-    # Get raw scan index
+    # 3. Signal Pre-processing (STRICTLY FOLLOWING PAPER ISABEL)
     s21_idx = int(row["original_s21_idx"])
-    fd_raw = s21[s21_idx]
     
-    # A. COMPLEX CALIBRATION (CRITICAL FIX)
-    # Get empty chamber reference index
+    # Get Raw Data and ensure it's a complex numpy array
+    fd_raw = np.asarray(s21[s21_idx], dtype=np.complex128)
+    
+    # A. COMPLEX CALIBRATION (Eq. 1 in Paper: S_cal = S_adi / S_emp)
     emp_ref_id = row.get("emp_ref_id", None)
-    if emp_ref_id is not None and not np.isnan(emp_ref_id):
-        emp_idx = id_to_original_idx.get(int(emp_ref_id), None)
-        if emp_idx is not None:
-            fd_empty = s21[emp_idx]
-            fd_scan = sp.calibrate_s_parameters(fd_raw, fd_empty)
-        else:
-            fd_scan = fd_raw # Fallback if ref missing
-    else:
-        fd_scan = fd_raw
+    fd_scan = fd_raw.copy()
+    
+    if emp_ref_id is not None and not pd.isna(emp_ref_id):
+        try:
+            emp_idx = id_to_original_idx.get(int(emp_ref_id), None)
+            if emp_idx is not None:
+                fd_empty = np.asarray(s21[emp_idx], dtype=np.complex128)
+                # Perform complex division to de-embed system response
+                fd_scan = sp.calibrate_s_parameters(fd_raw, fd_empty)
+            else:
+                print(f"[Warning] emp_ref_id {int(emp_ref_id)} not found in map for scan {scan_idx}")
+        except Exception as e:
+            print(f"[Warning] Calibration failed for scan {scan_idx}: {e}")
 
-    # B. Bandpass Filter (4-6 GHz)
+    # B. Bandpass Filter (4-6 GHz) - Isolating discriminative power
     if use_bandpass and freq_axis is not None:
-        fd_scan = sp.apply_bandpass_filter(fd_scan, freq_axis, low_cut=4e9, high_cut=6e9)
+        freq_axis_arr = np.asarray(freq_axis)
+        fd_scan = sp.apply_bandpass_filter(fd_scan, freq_axis_arr, low_cut=4e9, high_cut=6e9)
 
-    # C. Time Domain Transform
-    time_signal = sp.to_time_domain(fd_scan)
+    # C. Time Domain Transform (ICZT)
+    try:
+        time_signal = sp.to_time_domain(fd_scan)
+    except Exception as e:
+        raise RuntimeError(f"ICZT failed for scan {scan_idx}: {e}")
+        
     time_axis = sp.get_time_axis(time_signal.shape[0])
 
-    # ---- Clutter Suppression (Optional) ----
+    # D. Clutter Suppression (Optional TVSVD)
     if use_tvsvd:
-        time_signal_filtered, n_removed = sp.apply_hybrid_tvsvd(time_signal)
+        time_signal, n_removed = sp.apply_hybrid_tvsvd(time_signal)
     else:
-        time_signal_filtered, n_removed = time_signal, 0
+        n_removed = 0
 
-    # ---- Imaging Grid Setup ----
+    # 4. Imaging Grid Setup
     grid_x_mm, grid_y_mm, axis_mm, grid_radius_mm = build_grid(
         breast_radius_mm, margin_factor, grid_step_mm)
-    grid_x_m, grid_y_m = grid_x_mm.ravel() / 1000.0, grid_y_mm.ravel() / 1000.0
+    grid_x_m = grid_x_mm.ravel() / 1000.0
+    grid_y_m = grid_y_mm.ravel() / 1000.0
     shell_center_m = (shell_center[0] / 1000.0, shell_center[1] / 1000.0)
 
-    # ---- Delay Grid Calculation (Snellius Bistatic Precise) ----
+    # 5. Delay Grid Calculation (Snellius Bistatic Precise)
     cache_key = _delay_cache_key(
         row["phant_id"], use_snellius, ant_rad_mm, breast_radius_mm, 
         v_tissue, margin_factor, grid_step_mm, shell_center
@@ -115,47 +116,50 @@ def reconstruct_scan(scan_idx, s21, tumor_model, id_to_original_idx, freq_axis=N
         delay_grid = _DELAY_CACHE[cache_key]
     else:
         if use_snellius:
-            # USE THE NEW PRECISE BISTATIC FUNCTION
             delay_grid = physics.snellius_bistatic_delay_precise(
                 geom["ant_x"], geom["ant_y"], 
-                geom["ant_x_b"], geom["ant_y_b"], # Pass Rx positions!
+                geom["ant_x_b"], geom["ant_y_b"],
                 grid_x_m, grid_y_m,
                 breast_radius_mm / 1000.0, v_tissue
             )
         else:
-            # Fallback to legacy two-medium model
-            delay_grid = physics.two_medium_delay(
-                geom["ant_x"], geom["ant_y"], geom["ant_x_b"], geom["ant_y_b"],
-                grid_x_m, grid_y_m,
-                breast_radius_mm / 1000.0, v_tissue, shell_center=shell_center_m,
-            )
+            # Fallback to simple straight-ray bistatic
+            tx_pos = np.stack([geom["ant_x"], geom["ant_y"]], axis=1)
+            rx_pos = np.stack([geom["ant_x_b"], geom["ant_y_b"]], axis=1)
+            grid_pos = np.stack([grid_x_m, grid_y_m], axis=1)
+            n_ant = len(geom["ant_x"])
+            n_pix = len(grid_x_m)
+            delay_grid = np.zeros((n_ant, n_pix))
+            for i in range(n_ant):
+                d_tx = np.linalg.norm(grid_pos - tx_pos[i], axis=1)
+                d_rx = np.linalg.norm(grid_pos - rx_pos[i], axis=1)
+                delay_grid[i] = (d_tx + d_rx) / v_tissue
         
-        # Reshape once for caching and usage
         delay_grid = delay_grid.reshape(-1, *grid_x_mm.shape)
         _DELAY_CACHE[cache_key] = delay_grid
 
-    # D. Apply Depth Gain AFTER delay grid is ready
+    # E. Depth Gain Compensation
     if use_depth_gain:
-        time_signal_filtered = sp.apply_depth_gain(time_signal_filtered, delay_grid)
+        time_signal = sp.apply_depth_gain(time_signal, delay_grid)
     
-    # ---- Beamforming ----
+    # 6. Beamforming
     if beamformer == "das":
         if use_cf:
-            _, cf_map, img = bf.das_coherent_cf(time_signal_filtered, time_axis, delay_grid)
+            _, cf_map, img = bf.das_coherent_cf(time_signal, time_axis, delay_grid)
         else:
-            img = bf.das_coherent(time_signal_filtered, time_axis, delay_grid)
+            img = bf.das_coherent(time_signal, time_axis, delay_grid)
             cf_map = None
     elif beamformer == "dmas":
-        td_mag = np.abs(time_signal_filtered)
+        td_mag = np.abs(time_signal)
         if use_cf:
-            img, cf_map = bf.dmas_cf(time_signal_filtered, td_mag, time_axis, delay_grid)
+            img, cf_map = bf.dmas_cf(time_signal, td_mag, time_axis, delay_grid)
         else:
             img = bf.dmas(td_mag, time_axis, delay_grid)
             cf_map = None
     else:
         raise ValueError(f"Unknown beamformer: {beamformer!r}")
 
-    # ---- Blob Extraction + Localization ----
+    # 7. Blob Extraction + Localization
     blob = bd.extract_blob_candidate(img, axis_mm, axis_mm)
 
     gt_x_mm = float(row["tumor_x_mm"])
@@ -194,7 +198,7 @@ def reconstruct_scan(scan_idx, s21, tumor_model, id_to_original_idx, freq_axis=N
         result["diagnostics"] = dict(
             image=img, cf_map=cf_map, tumor_mask=blob["tumor_mask"],
             axis_mm=axis_mm, time_signal=time_signal,
-            time_signal_filtered=time_signal_filtered, delay_grid=delay_grid,
+            time_signal_filtered=time_signal, delay_grid=delay_grid,
         )
 
     return result

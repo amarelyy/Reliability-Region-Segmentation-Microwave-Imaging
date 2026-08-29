@@ -52,24 +52,21 @@ def snellius_bistatic_delay_precise(ant_x, ant_y, ant_x_b, ant_y_b, grid_x_m, gr
         rx = rx_pos[i]
         
         # --- LEG 1: Tx -> Grid Point ---
-        # Vector from Tx to Grid
         vec_tx = grid_pos - tx # (N_pix, 2)
         dist_tx_total = np.linalg.norm(vec_tx, axis=1)
         
         # Line-Circle Intersection for Tx leg
-        # P(t) = Tx + t * vec_tx. Find t where |P(t)| = R
         a1 = np.sum(vec_tx**2, axis=1)
         b1 = 2 * np.sum(tx * vec_tx, axis=1)
         c1 = np.sum(tx**2) - R**2
         disc1 = b1**2 - 4*a1*c1
         
-        # Default: all air (if miss or inside)
-        dist_air_tx = dist_tx_total
-        dist_tissue_tx = 0.0
+        # FIX: Initialize as ARRAYS, not floats
+        dist_air_tx = dist_tx_total.copy()
+        dist_tissue_tx = np.zeros_like(dist_tx_total)
         
         valid1 = disc1 >= 0
         if np.any(valid1):
-            # Take the smallest positive t (entry point)
             sqrt_disc1 = np.sqrt(np.maximum(disc1[valid1], 0))
             t1 = (-b1[valid1] - sqrt_disc1) / (2*a1[valid1])
             t2 = (-b1[valid1] + sqrt_disc1) / (2*a1[valid1])
@@ -77,24 +74,14 @@ def snellius_bistatic_delay_precise(ant_x, ant_y, ant_x_b, ant_y_b, grid_x_m, gr
             # Entry is the first intersection
             t_entry = np.where(t1 > 1e-6, t1, t2)
             
-            # If grid is inside phantom, t_entry will be < 1
-            # Distance in air = t_entry * total_dist
-            # Distance in tissue = (1 - t_entry) * total_dist
-            
             is_inside = t_entry < 1.0
             idx_inside = np.where(valid1)[0][is_inside]
-            idx_outside = np.where(valid1)[0][~is_inside]
             
             if len(idx_inside) > 0:
                 t_val = t_entry[is_inside]
                 dist_air_tx[idx_inside] = t_val * dist_tx_total[idx_inside]
                 dist_tissue_tx[idx_inside] = (1 - t_val) * dist_tx_total[idx_inside]
                 
-            # For points outside phantom but line intersects circle (grazing or through)
-            # We assume straight line path for simplicity in this 'precise' model 
-            # unless we want to implement full refraction angle calculation which is very heavy.
-            # However, for UM-BMID, most grids are INSIDE.
-            
         # --- LEG 2: Grid Point -> Rx ---
         vec_rx = rx - grid_pos # (N_pix, 2)
         dist_rx_total = np.linalg.norm(vec_rx, axis=1)
@@ -104,8 +91,9 @@ def snellius_bistatic_delay_precise(ant_x, ant_y, ant_x_b, ant_y_b, grid_x_m, gr
         c2 = np.sum(grid_pos**2) - R**2
         disc2 = b2**2 - 4*a2*c2
         
-        dist_air_rx = dist_rx_total
-        dist_tissue_rx = 0.0
+        # FIX: Initialize as ARRAYS, not floats
+        dist_air_rx = dist_rx_total.copy()
+        dist_tissue_rx = np.zeros_like(dist_rx_total)
         
         valid2 = disc2 >= 0
         if np.any(valid2):
