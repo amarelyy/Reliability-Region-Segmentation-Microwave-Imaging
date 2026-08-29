@@ -14,6 +14,7 @@ from . import signal_processing as sp
 from . import beamforming as bf
 from . import blob_detection as bd
 from . import metrics as mx
+from typing import Dict, Any
 
 DEFAULT_GRID_MARGIN_FACTOR = 1.5
 DEFAULT_GRID_STEP_MM = 1.0
@@ -182,7 +183,7 @@ def reconstruct_scan(scan_idx, s21, tumor_model, id_to_original_idx, freq_axis=N
 
     runtime_sec = perf_counter() - t_start
 
-    result = dict(
+    result: dict[str, Any] = dict(
         scan_idx=scan_idx,
         phant_id=row["phant_id"],
         birads=row.get("birads", np.nan),
@@ -196,7 +197,7 @@ def reconstruct_scan(scan_idx, s21, tumor_model, id_to_original_idx, freq_axis=N
         runtime_sec=runtime_sec,
         **computed,
     )
-
+    
     if return_diagnostics:
         result["diagnostics"] = dict(
             image=img, cf_map=cf_map, tumor_mask=blob["tumor_mask"],
