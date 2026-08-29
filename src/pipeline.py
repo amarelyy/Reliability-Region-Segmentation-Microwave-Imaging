@@ -64,7 +64,8 @@ def reconstruct_scan(scan_idx, s21, tumor_model, id_to_original_idx, freq_axis=N
     # Get Raw Data and ensure it's a complex numpy array
     fd_raw = np.asarray(s21[s21_idx], dtype=np.complex128)
     
-    # A. COMPLEX CALIBRATION (Eq. 1 in Paper: S_cal = S_adi / S_emp)
+        # A. BACKGROUND SUBTRACTION (CORRECT FOR UM-BMID)
+    # Isolates the scattered field from the tumor by removing the background response.
     emp_ref_id = row.get("emp_ref_id", None)
     fd_scan = fd_raw.copy()
     
@@ -73,13 +74,15 @@ def reconstruct_scan(scan_idx, s21, tumor_model, id_to_original_idx, freq_axis=N
             emp_idx = id_to_original_idx.get(int(emp_ref_id), None)
             if emp_idx is not None:
                 fd_empty = np.asarray(s21[emp_idx], dtype=np.complex128)
-                # Perform complex division to de-embed system response
-                fd_scan = sp.calibrate_s_parameters(fd_raw, fd_empty)
+                
+                # THE FIX: Subtraction, NOT division!
+                fd_scan = fd_raw - fd_empty 
+                
             else:
                 print(f"[Warning] emp_ref_id {int(emp_ref_id)} not found in map for scan {scan_idx}")
         except Exception as e:
-            print(f"[Warning] Calibration failed for scan {scan_idx}: {e}")
-
+            print(f"[Warning] Background subtraction failed for scan {scan_idx}: {e}")
+            
     # B. Bandpass Filter (4-6 GHz) - Isolating discriminative power
     if use_bandpass and freq_axis is not None:
         freq_axis_arr = np.asarray(freq_axis)
