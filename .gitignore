@@ -1,0 +1,16 @@
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Data and large files
+data/
+*.csv
+*.pkl
+*.npy
+*.vcd
+
+# OS files
+.DS_Store
+Thumbs.db
