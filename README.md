@@ -2,14 +2,13 @@
 
 ## 1. Environment Setup
 ### Create a virtual environment using Python 3.11
-py -3.11 -m venv venv_ai
+`py -3.11 -m venv venv_ai`
 
 ### Activate the environment
-.\venv_ai\Scripts\activate
+`.\venv_ai\Scripts\activate`
 
-### Install dependencies (PyTorch with CUDA 12.1)
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-pip install numpy pandas scipy matplotlib joblib scikit-learn
+### Install dependencies 
+`pip install -r requirements.txt`
 
 ## 2. Data Preparation
 Ensure the data/ folder contains the following files from the UM-BMID dataset:
@@ -21,9 +20,9 @@ Ensure the data/ folder contains the following files from the UM-BMID dataset:
 ### Step A: Radar Reconstruction (Physics Baseline)
 Run the ablation study to generate radar images using the Snellius Bistatic model. Feel free to adjust number of workers or number of scans. 
 
-To smoke test, use:
+To smoke test, use:\
 `python ablation_runner.py --n-scans 30 --n-jobs 1`
-To run all, use:
+To run all, use:\
 `python ablation_runner.py --n-jobs 1`
 
 ### Step B: U-Net Training
@@ -38,3 +37,10 @@ Run evaluation metrics (Dice Score, CoM Error)
 
 Generate visual comparisons
 `python -m unet.inference.visualize`
+
+## 4. Project Structure
+- src/: Core physics pipeline (Snellius delay, signal processing).
+- unet/: Deep learning modules (Dataset, Model, Training, Inference).
+- data/: Raw UM-BMID dataset and metadata.
+- results/: Output CSVs from radar ablation studies.
+- unet/checkpoints/: Saved U-Net model weights (.pth).
