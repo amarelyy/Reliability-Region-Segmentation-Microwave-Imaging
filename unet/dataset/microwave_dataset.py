@@ -1,5 +1,5 @@
 """
-unet_reliability/dataset/microwave_dataset.py
+unet/dataset/microwave_dataset.py
 
 Custom PyTorch Dataset for Microwave Imaging.
 Generates 2-channel input (Magnitude + CF) and Binary Ground Truth Mask.
@@ -11,6 +11,8 @@ import torch
 from torch.utils.data import Dataset
 from pathlib import Path
 import sys
+import torchvision.transforms as T
+from torchvision.transforms import InterpolationMode # <--- Import penting untuk kontrol interpolasi
 
 # Add project root to path to import src modules
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
@@ -20,7 +22,7 @@ from src.pipeline import reconstruct_scan
 
 class MicrowaveImagingDataset(Dataset):
     def __init__(self, s21, tumor_model, id_to_original_idx, freq_axis, 
-                 transform=None, use_cf=True, grid_size=128):
+                 transform=None, use_cf=True, target_size=128):
         """
         Args:
             s21: Complex S-parameter array.
@@ -29,7 +31,7 @@ class MicrowaveImagingDataset(Dataset):
             freq_axis: Frequency points for bandpass filtering.
             transform: Optional torchvision transforms (e.g., augmentation).
             use_cf: Whether to include Coherence Factor as 2nd channel.
-            grid_size: Target output size for the image/mask (e.g., 128x128).
+            target_size: Target output size for the image/mask (e.g., 128x128).
         """
         self.s21 = s21
         self.tumor_model = tumor_model.reset_index(drop=True)
@@ -37,25 +39,40 @@ class MicrowaveImagingDataset(Dataset):
         self.freq_axis = freq_axis
         self.transform = transform
         self.use_cf = use_cf
-        self.grid_size = grid_size
+        self.target_size = target_size
         
-        # Pre-compute axis_mm range based on a sample to ensure consistency
-        # In a real scenario, we might want to normalize coordinates globally
-        self.sample_row = self.tumor_model.iloc[0]
-        self.breast_radius_sample = float(self.sample_row["breast_radius_mm"])
+        # CRITICAL FIX: Use different interpolation for images vs masks
+        # 1. Images: Bilinear is smooth and good for continuous data (Magnitude/CF)
+        self.img_resizer = T.Resize(
+            (target_size, target_size), 
+            interpolation=InterpolationMode.BILINEAR, 
+            antialias=True
+        )
+        
+        # 2. Masks: NEAREST is MANDATORY to preserve exact 0 and 1 values. 
+        # Bilinear interpolation on a mask creates "fractional" pixels (e.g., 0.3) 
+        # which causes BCELoss to crash or corrupts the training.
+        self.mask_resizer = T.Resize(
+            (target_size, target_size), 
+            interpolation=InterpolationMode.NEAREST
+        )
 
     def __len__(self):
         return len(self.tumor_model)
 
     def _create_gt_mask(self, row, axis_mm):
-        """Create a binary mask from tumor metadata."""
+        """Create a strict binary mask from tumor metadata."""
         gt_x = float(row["tumor_x_mm"])
         gt_y = float(row["tumor_y_mm"])
         gt_r = float(row["tumor_radius_mm"])
         
         gx, gy = np.meshgrid(axis_mm, axis_mm)
         dist = np.sqrt((gx - gt_x)**2 + (gy - gt_y)**2)
+        
+        # Create mask and ensure it is strictly 0.0 or 1.0
         mask = (dist <= gt_r).astype(np.float32)
+        mask = np.clip(mask, 0.0, 1.0) # Absolute safeguard against any float weirdness
+        
         return mask
 
     def __getitem__(self, idx):
@@ -75,11 +92,7 @@ class MicrowaveImagingDataset(Dataset):
         cf_map = result["diagnostics"]["cf_map"] if self.use_cf else None
         axis_mm = result["diagnostics"]["axis_mm"]
         
-        # 2. Resize/Normalize to target grid size
-        # Simple center-crop or resize logic would go here. 
-        # For now, assuming pipeline output matches grid_size or is handled by transform
-        
-        # Normalize Magnitude to [0, 1]
+        # 2. Normalize Magnitude to [0, 1]
         img_norm = (img - img.min()) / (img.max() - img.min() + 1e-8)
         
         # Stack Channels: (2, H, W)
@@ -97,6 +110,11 @@ class MicrowaveImagingDataset(Dataset):
         input_tensor = torch.from_numpy(input_data).float()
         mask_tensor = torch.from_numpy(gt_mask).float()
 
+        # 5. RESIZE TO FIXED SIZE (Using correct interpolation methods)
+        input_tensor = self.img_resizer(input_tensor)
+        mask_tensor = self.mask_resizer(mask_tensor)
+
+        # 6. Apply optional transforms (e.g., augmentations) if provided
         if self.transform:
             input_tensor = self.transform(input_tensor)
             mask_tensor = self.transform(mask_tensor)

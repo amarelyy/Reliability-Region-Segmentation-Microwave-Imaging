@@ -11,6 +11,11 @@ data/
 *.npy
 *.vcd
 
+# Virtual Environment
+venv_ai/
+venv/
+.env
+
 # OS files
 .DS_Store
 Thumbs.db
