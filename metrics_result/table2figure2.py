@@ -1,5 +1,5 @@
 """
-metrics_result/table2_and_figure2.py
+metrics_result/table2figure2.py
 
 Generates Table 2 (selective classification performance CSV) and
 Figure 2 (selective classification curve with CI and threshold).
@@ -22,10 +22,7 @@ sys.path.append(str(ROOT))
 CSV_PATH = ROOT / "rrs_mbi" / "results" / "metrics_raw.csv"
 OUT_DIR = ROOT / "metrics_result"
 
-THRESH_LOW = 0.30
-THRESH_HIGH = 0.70
 LOC_DET_THRESH_MM = 15.0
-SIZE_DET_THRESH_MM = 5.0
 N_BOOTSTRAP = 1000
 CONFIDENCE = 0.95
 KEEP_RATIOS = np.linspace(1.0, 0.1, 10)
@@ -56,12 +53,7 @@ def compute_table2(df: pd.DataFrame) -> pd.DataFrame:
         n_keep = max(1, int(total * ratio))
         subset = df_sorted.iloc[:n_keep]
 
-        loc_errors = subset["localization_error_mm"].dropna().to_numpy(dtype=np.float64)
-        size_errors = (
-            subset["size_error_mm"].dropna().to_numpy(dtype=np.float64)
-            if "size_error_mm" in subset.columns
-            else np.array([], dtype=np.float64)
-        )
+        loc_errors = subset["localization_error"].dropna().to_numpy(dtype=np.float64)
 
         if len(loc_errors) == 0:
             continue
@@ -70,15 +62,6 @@ def compute_table2(df: pd.DataFrame) -> pd.DataFrame:
 
         loc_detected = int(np.sum(loc_errors <= LOC_DET_THRESH_MM))
         loc_det_rate = loc_detected / len(loc_errors) * 100
-
-        if len(size_errors) > 0:
-            size_detected = int(np.sum(size_errors <= SIZE_DET_THRESH_MM))
-            size_det_rate = size_detected / len(size_errors) * 100
-            mean_size_err = float(np.mean(size_errors))
-        else:
-            size_detected = 0
-            size_det_rate = float("nan")
-            mean_size_err = float("nan")
 
         rows.append({
             "keep_ratio": round(float(ratio), 2),
@@ -90,10 +73,6 @@ def compute_table2(df: pd.DataFrame) -> pd.DataFrame:
             "ci_upper_mm": ci_hi,
             "loc_detection_rate_pct": round(loc_det_rate, 1),
             "loc_detected_count": loc_detected,
-            "mean_size_error_mm": round(mean_size_err, 2) if not np.isnan(mean_size_err) else float("nan"),
-            "size_detection_rate_pct": round(size_det_rate, 1) if not np.isnan(size_det_rate) else float("nan"),
-            "size_detected_count": size_detected,
-            "size_valid_count": len(size_errors),
         })
 
     return pd.DataFrame(rows)
@@ -102,7 +81,6 @@ def compute_table2(df: pd.DataFrame) -> pd.DataFrame:
 def plot_figure2(t2: pd.DataFrame, save_path: Path) -> None:
     fig, ax1 = plt.subplots(figsize=(9, 5.5))
 
-    # Mean error with CI
     ax1.fill_between(
         t2["scans_kept"],
         t2["ci_lower_mm"],
@@ -124,7 +102,6 @@ def plot_figure2(t2: pd.DataFrame, save_path: Path) -> None:
     ax1.tick_params(axis="y", labelcolor="#1f77b4")
     ax1.grid(True, linestyle="--", alpha=0.6)
 
-    # Threshold on secondary axis
     ax2 = ax1.twinx()
     ax2.plot(
         t2["scans_kept"],
@@ -143,7 +120,6 @@ def plot_figure2(t2: pd.DataFrame, save_path: Path) -> None:
     )
     ax2.tick_params(axis="y", labelcolor="#d62728")
 
-    # Detection rate annotation
     baseline_det = t2[t2["keep_ratio"] == 1.0]["loc_detection_rate_pct"].values[0]
     filtered_det = t2[t2["keep_ratio"] == 0.1]["loc_detection_rate_pct"].values[0]
     ax1.annotate(
@@ -157,7 +133,6 @@ def plot_figure2(t2: pd.DataFrame, save_path: Path) -> None:
         bbox=dict(boxstyle="round,pad=0.3", facecolor="#e8f5e9", edgecolor="#2ca02c"),
     )
 
-    # Variance annotation
     baseline_std = t2[t2["keep_ratio"] == 1.0]["std_loc_error_mm"].values[0]
     filtered_std = t2[t2["keep_ratio"] == 0.1]["std_loc_error_mm"].values[0]
     var_reduction = (1 - filtered_std / baseline_std) * 100
@@ -204,7 +179,7 @@ def main() -> None:
 
     df = pd.read_csv(CSV_PATH)
 
-    required_cols = ["reliability_score", "localization_error_mm"]
+    required_cols = ["reliability_score", "localization_error"]
     missing = [c for c in required_cols if c not in df.columns]
     if missing:
         raise ValueError(
@@ -214,35 +189,29 @@ def main() -> None:
 
     print(f"Loaded {len(df)} scans from {CSV_PATH}")
 
-    # Compute Table 2
     t2 = compute_table2(df)
 
-    # Save CSV
     csv_out = OUT_DIR / "table2_selective_classification.csv"
     t2.to_csv(csv_out, index=False)
 
-    # Print table
-    print("\n" + "=" * 90)
+    print("\n" + "=" * 80)
     print("TABLE 2: SELECTIVE CLASSIFICATION PERFORMANCE")
-    print("=" * 90)
+    print("=" * 80)
     print(
         f"{'Keep%':<7} | {'N':<5} | {'Thresh':<8} | {'MeanErr':<9} | "
-        f"{'Std':<7} | {'95% CI':<16} | {'DetRate':<8} | {'SizeErr':<9} | {'SizeDet'}"
+        f"{'Std':<7} | {'95% CI':<16} | {'DetRate'}"
     )
-    print("-" * 90)
+    print("-" * 80)
     for _, r in t2.iterrows():
         ci_str = f"[{r['ci_lower_mm']:.1f}-{r['ci_upper_mm']:.1f}]"
-        size_err_str = f"{r['mean_size_error_mm']:.2f}" if not np.isnan(r["mean_size_error_mm"]) else "N/A"
-        size_det_str = f"{r['size_detection_rate_pct']:.1f}%" if not np.isnan(r["size_detection_rate_pct"]) else "N/A"
         print(
             f"{r['keep_ratio']*100:<6.0f}% | {r['scans_kept']:<5} | "
             f"{r['actual_threshold']:<8.4f} | {r['mean_loc_error_mm']:<9.2f} | "
             f"{r['std_loc_error_mm']:<7.2f} | {ci_str:<16} | "
-            f"{r['loc_detection_rate_pct']:<7.1f}% | {size_err_str:<9} | {size_det_str}"
+            f"{r['loc_detection_rate_pct']:.1f}%"
         )
-    print("=" * 90)
+    print("=" * 80)
 
-    # Key findings
     baseline = t2[t2["keep_ratio"] == 1.0].iloc[0]
     filtered = t2[t2["keep_ratio"] == 0.1].iloc[0]
     det_abs = filtered["loc_detection_rate_pct"] - baseline["loc_detection_rate_pct"]
@@ -254,7 +223,6 @@ def main() -> None:
     print(f"  Std reduction:   {baseline['std_loc_error_mm']:.2f} -> {filtered['std_loc_error_mm']:.2f} mm (-{var_red:.1f}%)")
     print(f"  Mean error:      {baseline['mean_loc_error_mm']:.2f} -> {filtered['mean_loc_error_mm']:.2f} mm (stable)")
 
-    # Generate Figure 2
     fig_out = OUT_DIR / "fig2_selective_classification.png"
     plot_figure2(t2, fig_out)
 
