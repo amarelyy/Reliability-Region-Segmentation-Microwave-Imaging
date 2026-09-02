@@ -31,9 +31,34 @@ def bootstrap_confidence_interval(errors: np.ndarray, n_bootstraps: int = 1000, 
     upper_bound = float(np.percentile(bootstrap_means, 100 * (1 - alpha / 2)))
     return lower_bound, upper_bound
 
+
+
 def run_evaluation() -> pd.DataFrame:
     print("Loading data...")
     data = load_all_data()  # type: ignore
+    
+        # DIAGNOSTIC: Cek berapa scan yang punya GT valid
+    total_raw = len(tumor_model)
+    gt_cols = ["tumor_x_mm", "tumor_y_mm", "tumor_radius_mm"]
+    available_gt = [c for c in gt_cols if c in tumor_model.columns]
+    
+    if available_gt:
+        valid_gt_mask = tumor_model[available_gt].notna().all(axis=1)
+        n_valid_gt = valid_gt_mask.sum()
+        n_no_gt = total_raw - n_valid_gt
+        print(f"\n📊 GT Diagnostic:")
+        print(f"   Total tumor_model rows: {total_raw}")
+        print(f"   Rows with valid GT ({', '.join(available_gt)}): {n_valid_gt}")
+        print(f"   Rows without GT (NaN/missing): {n_no_gt}")
+        
+        # Cek juga dari hasil reconstruct
+        sample_res = reconstruct_scan(0, s21, tumor_model, id_to_original_idx, return_diagnostics=True)
+        print(f"   Sample reconstruct keys: {list(sample_res.keys())[:10]}...")
+        print(f"   Sample gt_x_mm: {sample_res.get('gt_x_mm', 'NOT FOUND')}")
+        print(f"   Sample gt_y_mm: {sample_res.get('gt_y_mm', 'NOT FOUND')}")
+        print(f"   Sample gt_r_mm: {sample_res.get('gt_r_mm', 'NOT FOUND')}")
+    else:
+        print(f"\n⚠️ No GT columns found in tumor_model. Columns: {tumor_model.columns.tolist()}")
     
     s21 = data["s21"]
     tumor_model = data["tumor_model"]
