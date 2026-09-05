@@ -37,7 +37,8 @@ def build_grid(breast_radius_mm, margin_factor=DEFAULT_GRID_MARGIN_FACTOR,
 
 def reconstruct_scan(scan_idx, s21, tumor_model, id_to_original_idx, freq_axis=None,
                       beamformer="das", use_snellius=True, use_cf=True,
-                      use_tvsvd=False, use_bandpass=True, use_depth_gain=True,
+                      use_tvsvd=True, use_rms_norm=True, bandpass_mode="full",
+                      use_depth_gain=True, gate_ns=0.5,
                       shell_center=(0.0, 0.0),
                       margin_factor=DEFAULT_GRID_MARGIN_FACTOR,
                       grid_step_mm=DEFAULT_GRID_STEP_MM,
@@ -84,10 +85,15 @@ def reconstruct_scan(scan_idx, s21, tumor_model, id_to_original_idx, freq_axis=N
         except Exception as e:
             print(f"[Warning] Background subtraction failed for scan {scan_idx}: {e}")
             
-    # B. Bandpass Filter (4-6 GHz) - Isolating discriminative power
-    if use_bandpass and freq_axis is not None:
-        freq_axis_arr = np.asarray(freq_axis)
-        fd_scan = sp.apply_bandpass_filter(fd_scan, freq_axis_arr, low_cut=4e9, high_cut=6e9)
+    # B. Bandpass (explicit mode — no silent skip)
+    if bandpass_mode == "4-6ghz":
+        if freq_axis is None:
+            raise ValueError("bandpass_mode='4-6ghz' requires freq_axis.")
+        fd_scan = sp.apply_band_mask(fd_scan, freq_axis, low_cut=4e9, high_cut=6e9)
+    elif bandpass_mode == "full":
+        pass  # full 1-8 GHz (baseline, reproduktibel)
+    else:
+        raise ValueError(f"Unknown bandpass_mode: {bandpass_mode!r}")
 
     # C. Time Domain Transform (ICZT)
     try:
@@ -97,6 +103,10 @@ def reconstruct_scan(scan_idx, s21, tumor_model, id_to_original_idx, freq_axis=N
         
     time_axis = sp.get_time_axis(time_signal.shape[0])
 
+    # C2.5 RMS normalization per-channel
+    if use_rms_norm:
+        time_signal = sp.apply_rms_norm(time_signal)
+    
     # D. Clutter Suppression (Optional TVSVD)
     if use_tvsvd:
         time_signal, n_removed = sp.apply_hybrid_tvsvd(time_signal)
@@ -149,16 +159,18 @@ def reconstruct_scan(scan_idx, s21, tumor_model, id_to_original_idx, freq_axis=N
     # 6. Beamforming
     if beamformer == "das":
         if use_cf:
-            _, cf_map, img = bf.das_coherent_cf(time_signal, time_axis, delay_grid)
+            _, cf_map, img = bf.das_coherent_cf(time_signal, time_axis, delay_grid,
+                                                gate_ns=gate_ns)
         else:
-            img = bf.das_coherent(time_signal, time_axis, delay_grid)
+            img = bf.das_coherent(time_signal, time_axis, delay_grid, gate_ns=gate_ns)
             cf_map = None
     elif beamformer == "dmas":
         td_mag = np.abs(time_signal)
         if use_cf:
-            img, cf_map = bf.dmas_cf(time_signal, td_mag, time_axis, delay_grid)
+            img, cf_map = bf.dmas_cf(time_signal, td_mag, time_axis, delay_grid,
+                                     gate_ns=gate_ns)
         else:
-            img = bf.dmas(td_mag, time_axis, delay_grid)
+            img = bf.dmas(td_mag, time_axis, delay_grid, gate_ns=gate_ns)
             cf_map = None
     else:
         raise ValueError(f"Unknown beamformer: {beamformer!r}")
@@ -194,6 +206,7 @@ def reconstruct_scan(scan_idx, s21, tumor_model, id_to_original_idx, freq_axis=N
         gt_x_mm=gt_x_mm, gt_y_mm=gt_y_mm, gt_r_mm=gt_r_mm,
         blob_area_px=blob["blob_area_px"], blob_compactness=blob["blob_compactness"],
         cf_at_peak=cf_at_peak,
+        use_rms_norm=use_rms_norm, bandpass_mode=bandpass_mode, gate_ns=gate_ns,
         runtime_sec=runtime_sec,
         **computed,
     )

@@ -132,10 +132,9 @@ def dmas(time_signal_magnitude, time_axis, delay_grid, subsample=3, window=None,
 
 
 def dmas_cf(time_signal_complex, time_signal_magnitude, time_axis, delay_grid,
-            subsample=3, window=None, cf_power=1.0):
-    """DMAS image weighted by the CF map computed from the full-array
-    coherent (complex) signal — reuses das_coherent_cf's cf_map rather than
-    recomputing CF from the DMAS-subsampled channels."""
-    _, cf_map, _ = das_coherent_cf(time_signal_complex, time_axis, delay_grid, window=window)
-    dmas_img = dmas(time_signal_magnitude, time_axis, delay_grid, subsample=subsample, window=window)
+            subsample=3, window=None, cf_power=1.0, gate_ns=GATE_NS):
+    _, cf_map, _ = das_coherent_cf(time_signal_complex, time_axis, delay_grid,
+                                   window=window, gate_ns=gate_ns)
+    dmas_img = dmas(time_signal_magnitude, time_axis, delay_grid,
+                   subsample=subsample, window=window, gate_ns=gate_ns)
     return dmas_img * (cf_map ** cf_power), cf_map

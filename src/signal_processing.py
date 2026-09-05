@@ -142,6 +142,30 @@ def apply_hybrid_tvsvd(time_signal):
     filtered = U @ np.diag(S_filtered) @ Vt
     return filtered, int(remove_mask.sum())
 
+def apply_rms_norm(time_signal):
+    """
+    Per-channel RMS normalization.
+    Menyeimbangkan energi rata-rata antar antena sebelum TVSVD/beamforming,
+    supaya channel gain tinggi (kulit/coupling) tidak mendominasi coherent sum.
+    Terbukti di repo lama (Bent-Ray).
+    time_signal: (n_time, n_ant) complex.
+    """
+    rms = np.sqrt(np.mean(np.abs(time_signal) ** 2, axis=0, keepdims=True))
+    return time_signal / (rms + 1e-12)
+
+def apply_band_mask(fd_signal, freq_axis, low_cut=4e9, high_cut=6e9, taper_hz=0.5e9):
+    """
+    Tapered spectral mask untuk memilih band [low_cut, high_cut].
+    Menggantikan apply_bandpass_filter (butter sepanjang axis frekuensi),
+    yang secara konsep TIDAK melakukan band selection.
+    Raised-cosine taper membatasi ringing di domain waktu.
+    """
+    f = np.asarray(freq_axis, dtype=float)
+    up = np.clip((f - (low_cut - taper_hz)) / (2 * taper_hz), 0.0, 1.0)
+    dn = np.clip(((high_cut + taper_hz) - f) / (2 * taper_hz), 0.0, 1.0)
+    mask = np.sin(np.minimum(up, dn) * np.pi / 2) ** 2
+    return fd_signal * mask[:, None]
+
 def apply_depth_gain(time_signal, delay_grid, alpha_db_per_cm=0.7):
     """
     Kompensasi attenuasi berdasarkan jarak tempuh sinyal.
