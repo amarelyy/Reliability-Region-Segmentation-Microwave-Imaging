@@ -44,6 +44,7 @@ def run_evaluation() -> pd.DataFrame:
     s21 = data["s21"]
     tumor_model = data["tumor_model"]
     id_to_original_idx = data["id_to_original_idx"]
+    freq_axis = data["freq_axis"]
 
     # ==================================================================
     # DIAGNOSTIC: Cek ketersediaan Ground Truth
@@ -73,8 +74,11 @@ def run_evaluation() -> pd.DataFrame:
     # Sample check
     try:
         sample = reconstruct_scan(
-            0, s21, tumor_model, id_to_original_idx, return_diagnostics=True
-        )  # type: ignore
+            0, s21, tumor_model, id_to_original_idx,
+            freq_axis=freq_axis, use_tvsvd=True, use_rms_norm=True,
+            bandpass_mode="full", gate_ns=0.70,
+            return_diagnostics=True
+        )
         print(
             f"   Sample gt_x_mm={sample.get('gt_x_mm')}, "
             f"gt_y_mm={sample.get('gt_y_mm')}, "
@@ -98,8 +102,14 @@ def run_evaluation() -> pd.DataFrame:
 
         try:
             res = reconstruct_scan(
-                i, s21, tumor_model, id_to_original_idx, return_diagnostics=True
-            )  # type: ignore
+                i, s21, tumor_model, id_to_original_idx,
+                freq_axis=freq_axis,
+                use_tvsvd=True,
+                use_rms_norm=True,
+                bandpass_mode="full",
+                gate_ns=0.70,
+                return_diagnostics=True
+            )
 
             img = res["diagnostics"]["image"]
             axis_mm = res["diagnostics"]["axis_mm"]
@@ -162,6 +172,11 @@ def run_evaluation() -> pd.DataFrame:
                 "scr_db": float(res.get("scr_db", np.nan)),
                 "smr_db": float(res.get("smr_db", np.nan)),
                 "cnr": float(res.get("cnr", np.nan)),
+                # Pipeline config traceability  <-- DI SINI
+                "tvsvd_removed": int(res.get("tvsvd_removed", 0)),
+                "gate_ns": float(res.get("gate_ns", np.nan)),
+                "use_rms_norm": bool(res.get("use_rms_norm", False)),
+                "bandpass_mode": res.get("bandpass_mode", "full"),
             })
 
         except Exception as e:
@@ -336,6 +351,16 @@ def main() -> None:
             f"{r['loc_detection_rate_pct']:<7.1f}% | "
             f"[{r['ci_lower']:.2f}-{r['ci_upper']:.2f}]"
         )
+        
+    acc = df["localization_error"] <= 15.0
+    high = df["reliability_score"] >= 0.70
+    low = df["reliability_score"] < 0.30
+    print(f"\n--- Confusion Matrix ---")
+    print(f"  TP (accurate + high rel):        {int((acc & high).sum())}")
+    print(f"  Fortuitous (accurate + low rel): {int((acc & low).sum())}")
+    print(f"  TN (inaccurate + low rel):       {int((~acc & low).sum())}")
+    print(f"  FP (inaccurate + high rel):      {int((~acc & high).sum())}")
+    
     print("=" * 70)
 
     # 4. Plot

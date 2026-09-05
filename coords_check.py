@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 import numpy as np
 import pandas as pd
+import rrs_mbi.metrics as rmx 
 
 ROOT = Path(__file__).resolve().parent
 sys.path.append(str(ROOT))
@@ -51,43 +52,39 @@ def main():
     print(f"\n[2/4] Running reconstruction with NEW pipeline config (TVSVD=ON)...")
     print(f"      (Note: use_rms_norm not yet implemented in pipeline.py, skipping for now)")
     
-    # 3. Loop Evaluasi
+        # 3. Loop Evaluasi
     for idx in range(n_scans):
         try:
-            # --- PANGGILAN PIPELINE DENGAN PARAMETER BARU ---
+            # --- PANGGILAN PIPELINE ---
+            # PENTING: return_diagnostics MUSTI TRUE biar bisa ambil gambar mentah
             result = reconstruct_scan(
                 scan_idx=int(idx),
                 s21=s21,
                 tumor_model=tumor_model,
                 id_to_original_idx=id_to_original_idx,
                 freq_axis=freq_axis,
-                use_tvsvd=True,          # <-- NYALAKAN TVSVD
-                use_rms_norm=True,      # <-- Belum ada di pipeline.py, set False dulu
-                bandpass_mode="full",    # <-- Default full band
-                gate_ns=0.70,              # <-- Default gate
-                return_diagnostics=False
+                use_tvsvd=True,          # NYALAKAN TVSVD
+                use_rms_norm=True,      # Ablation step 1: TVSVD only
+                bandpass_mode="full",
+                gate_ns=0.5,             # Ablation step 1: Gate standar dulu
+                return_diagnostics=True  # <-- WAJIB TRUE
             )
             
-               # ... (di dalam loop for idx in range(n_scans):) ...
-            
-            # Ekstrak Metrik
+            # Ekstrak Koordinat & Error
             gt_x = result["gt_x_mm"]
             gt_y = result["gt_y_mm"]
             pred_x = result["peak_x_mm"]
             pred_y = result["peak_y_mm"]
             error = result["localization_error_mm"]
             
-            # --- PERBAIKAN LOGIKA RELIABILITY ---
-            rel = result.get("reliability_score", np.nan)
+            # --- HITUNG RELIABILITY DARI GAMBAR MENTAH ---
+            img_raw = result["diagnostics"]["image"]
+            rel_dict = rmx.evaluate_scan_reliability(img_raw)
             
-            # FALLBACK: Kalau 'reliability_score' gak ada, coba hitung manual dari D dan B
-            if np.isnan(rel):
-                # Cek berbagai kemungkinan nama key dari metrics.py
-                D = result.get("peak_dominance", result.get("D", np.nan))
-                B = result.get("boundary_risk", result.get("B", np.nan))
-                if not np.isnan(D) and not np.isnan(B):
-                    rel = min(1.0, D / 5.0) * (1.0 - B)
-            # --------------------------------------
+            rel = rel_dict.get("reliability_score", np.nan)
+            D = rel_dict.get("peak_dominance", np.nan)
+            B = rel_dict.get("boundary_risk", np.nan)
+            # ---------------------------------------------
             
             # Hitung Jarak
             gt_dist_center = np.sqrt(gt_x**2 + gt_y**2)
@@ -101,10 +98,11 @@ def main():
                 "pred_x": pred_x, "pred_y": pred_y,
                 "error": error,
                 "reliability": rel,
+                "D": D, "B": B,
                 "gt_dist_center": gt_dist_center,
                 "pred_dist_center": pred_dist_center
             })
-            
+                  
             # Capture keys dari scan pertama buat debugging kalau error
             if idx == 0:
                 first_scan_keys = list(result.keys())
