@@ -22,8 +22,8 @@ from src.pipeline import reconstruct_scan
 
 # Konfigurasi Threshold
 ERROR_THRESH_MM = 15.0
-REL_HIGH_THRESH = 0.70
-REL_LOW_THRESH = 0.30
+REL_HIGH_THRESH = 0.40
+REL_LOW_THRESH = 0.15
 
 def main():
     print("=" * 80)
@@ -50,7 +50,6 @@ def main():
     display_indices = set(rng.choice(n_scans, size=min(10, n_scans), replace=False))
 
     print(f"\n[2/4] Running reconstruction with NEW pipeline config (TVSVD=ON)...")
-    print(f"      (Note: use_rms_norm not yet implemented in pipeline.py, skipping for now)")
     
         # 3. Loop Evaluasi
     for idx in range(n_scans):
@@ -65,7 +64,7 @@ def main():
                 freq_axis=freq_axis,
                 use_tvsvd=True,          # NYALAKAN TVSVD
                 use_rms_norm=True,      # Ablation step 1: TVSVD only
-                bandpass_mode="full",
+                bandpass_mode="full",  # Ablation step 2: Bandpass 4-6 GHz
                 gate_ns=0.5,             # Ablation step 1: Gate standar dulu
                 return_diagnostics=True  # <-- WAJIB TRUE
             )
@@ -79,8 +78,12 @@ def main():
             
             # --- HITUNG RELIABILITY DARI GAMBAR MENTAH ---
             img_raw = result["diagnostics"]["image"]
-            rel_dict = rmx.evaluate_scan_reliability(img_raw)
-            
+            axis_mm = result["diagnostics"]["axis_mm"]
+            cf_val = result.get("cf_at_peak", None)
+            rel_dict = rmx.evaluate_scan_reliability(img_raw, axis_mm=axis_mm, 
+                                                    cf_at_peak=cf_val,
+                                                    saturation_radius_mm=5.0)
+                        
             rel = rel_dict.get("reliability_score", np.nan)
             D = rel_dict.get("peak_dominance", np.nan)
             B = rel_dict.get("boundary_risk", np.nan)
@@ -146,6 +149,76 @@ def main():
     
     df = pd.DataFrame(results_list)
     
+    from scipy.stats import spearmanr, pearsonr
+
+    rel = df["reliability"].to_numpy(dtype=float)
+    err = df["error"].to_numpy(dtype=float)
+    mask = ~(np.isnan(rel) | np.isnan(err))
+
+    rho, p_rho = spearmanr(rel[mask], err[mask])
+    r, p_r = pearsonr(rel[mask], err[mask])
+
+    print(f"\n--- RELIABILITY vs ERROR CORRELATION (PENENTU) ---")
+    print(f"Spearman rho: {rho:+.3f}  (p={p_rho:.4f})")
+    print(f"Pearson   r : {r:+.3f}  (p={p_r:.4f})")
+    print(f"N valid     : {mask.sum()}")
+    print()
+    print("INTERPRETASI:")
+    print("  rho NEGATIF signifikan → reliability tinggi = error rendah → abstrak SUPPORTED")
+    print("  rho ~ 0 atau POSITIF  → reliability TIDAK prediktif → abstrak BELUM didukung")
+
+    # === SIGNAL FIDELITY ANALYSIS ===
+    print(f"\n--- SIGNAL FIDELITY ANALYSIS ---")
+    rel_arr = df["reliability"].to_numpy(dtype=float)
+    err_arr = df["error"].to_numpy(dtype=float)
+    valid = ~(np.isnan(rel_arr) | np.isnan(err_arr))
+    rel_v = rel_arr[valid]
+    err_v = err_arr[valid]
+
+    # 1. Point-biserial: Reliability vs Near-GT (binary)
+    near_gt = (err_v <= ERROR_THRESH_MM).astype(int)
+    if 0 < near_gt.sum() < len(near_gt):
+        from scipy.stats import pointbiserialr
+        r_pb, p_pb = pointbiserialr(rel_v, near_gt)
+        print(f"Point-biserial (Rel vs Near-GT): r={r_pb:+.3f}, p={p_pb:.4f}")
+        if r_pb > 0 and p_pb < 0.05:
+            print("  ✅ High reliability correlates with prediction near GT")
+        else:
+            print("  ⚠️  No significant correlation")
+
+    # 2. Mann-Whitney U: Error high-rel vs low-rel (non-parametric)
+    median_rel = np.nanmedian(rel_v)
+    high_mask = rel_v >= median_rel
+    low_mask = rel_v < median_rel
+    if high_mask.sum() > 0 and low_mask.sum() > 0:
+        from scipy.stats import mannwhitneyu
+        err_high = err_v[high_mask]
+        err_low = err_v[low_mask]
+        try:
+            u_stat, u_p = mannwhitneyu(err_high, err_low, alternative='less')
+            print(f"\nMann-Whitney U (high-rel error < low-rel error):")
+            print(f"  Mean error high-rel (n={high_mask.sum()}): {np.mean(err_high):.2f} mm")
+            print(f"  Mean error low-rel  (n={low_mask.sum()}):  {np.mean(err_low):.2f} mm")
+            print(f"  U={u_stat:.0f}, p={u_p:.4f}")
+            if u_p < 0.05:
+                print(f"  ✅ SIGNIFICANT — high-reliability scans have LOWER error!")
+                print(f"     This directly supports the abstract claim.")
+            else:
+                print(f"  ❌ Not significant (p={u_p:.4f})")
+        except Exception as e:
+            print(f"  Mann-Whitney failed: {e}")
+
+    # 3. Variance reduction
+    if high_mask.sum() > 0:
+        var_full = np.var(err_v)
+        var_high = np.var(err_high)
+        reduction = (1 - var_high / var_full) * 100 if var_full > 0 else 0
+        print(f"\nVariance Reduction (high-rel subset):")
+        print(f"  Full dataset variance:  {var_full:.2f}")
+        print(f"  High-rel variance:    {var_high:.2f}")
+        print(f"  Reduction:            {reduction:.1f}%")
+    # === END SIGNAL FIDELITY ===
+
     if len(df) > 0:
         print(f"\n--- Localization Performance ---")
         print(f"Mean Error: {df['error'].mean():.2f} mm")

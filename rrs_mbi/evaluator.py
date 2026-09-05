@@ -113,7 +113,8 @@ def run_evaluation() -> pd.DataFrame:
 
             img = res["diagnostics"]["image"]
             axis_mm = res["diagnostics"]["axis_mm"]
-            rel_metrics = evaluate_scan_reliability(img)
+            cf_val = res.get("cf_at_peak", None)
+            rel_metrics = evaluate_scan_reliability(img, axis_mm=axis_mm, cf_at_peak=cf_val, saturation_radius_mm=5.0)
 
             # Ground Truth
             gt_x = float(res.get("gt_x_mm", np.nan))

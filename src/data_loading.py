@@ -207,7 +207,7 @@ def load_all_data(s21_path=S21_PATH, meta_path=META_PATH, csv_path=PHANTOM_CSV_P
     print(f"[data_loading] s21 scans: {s21.shape[0]}  |  "
           f"tumor_model rows: {len(tumor_model)}  |  usable range: 0..{n_valid -1}")
     
-    n_freq = s21.shape[0]
+    n_freq = s21.shape[1]
     freq_axis = np.linspace(1e9, 8e9, n_freq)
     print(f"[data_loading] Reconstructed freq_axis: {n_freq} points from 1-8 GHz")
     
