@@ -155,7 +155,8 @@ def run_evaluation() -> pd.DataFrame:
                 # Reliability
                 "reliability_score": rel_metrics["reliability_score"],
                 "peak_dominance": rel_metrics["peak_dominance"],
-                "boundary_risk": rel_metrics["boundary_risk"],
+                "central_concentration": rel_metrics.get("central_concentration", float("nan")),
+                "boundary_risk": rel_metrics.get("boundary_risk", float("nan")),
                 # Localization
                 "localization_error": loc_error,
                 "pred_x_mm": pred_x,
@@ -181,6 +182,7 @@ def run_evaluation() -> pd.DataFrame:
             })
 
         except Exception as e:
+            print(f"  Scan {i} FAILED: {e}")
             skipped.append(i)
             continue
 
@@ -291,6 +293,36 @@ def plot_selective_classification_curve(
     print(f"Plot saved to {save_path}")
     plt.close()
 
+def run_permutation_test(df, n_top=50, n_perm=10000, seed=42):
+    """Test apakah top-N reliable scans punya mean error signifikan lebih rendah dari random."""
+    rng = np.random.default_rng(seed)
+    errors = df["localization_error"].dropna().to_numpy()
+    
+    # Observed: mean error of top-N by reliability
+    sorted_by_rel = df.sort_values("reliability_score", ascending=False).head(n_top)
+    observed_mean = sorted_by_rel["localization_error"].mean()
+    
+    # Null distribution: random samples of same size
+    random_means = np.array([
+        rng.choice(errors, size=n_top, replace=False).mean()
+        for _ in range(n_perm)
+    ])
+    
+    p_value = float(np.mean(random_means <= observed_mean))
+    
+    print(f"\n--- Permutation Test (top-{n_top} vs random) ---")
+    print(f"  Observed mean error (top-{n_top}): {observed_mean:.2f} mm")
+    print(f"  Full dataset mean error:           {errors.mean():.2f} mm")
+    print(f"  Difference:                        {errors.mean() - observed_mean:.2f} mm")
+    print(f"  Permutation p-value ({n_perm} iters):   {p_value:.4f}")
+    if p_value < 0.05:
+        print(f"  ✅ Significant at alpha=0.05")
+    elif p_value < 0.10:
+        print(f"  ⚠️  Marginal (p < 0.10)")
+    else:
+        print(f"  ❌ Not significant")
+    
+    return p_value
 
 def main() -> None:
     print("=" * 70)
@@ -303,6 +335,54 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     df.to_csv(out_dir / "metrics_raw.csv", index=False)
 
+        # === STRATIFIED COHORT ANALYSIS (per phantom) ===
+    print("\n" + "=" * 70)
+    print("STRATIFIED COHORT ANALYSIS (per phantom)")
+    print("=" * 70)
+
+    phantom_stats = df.groupby("scan_id").agg(
+        n_scans=("localization_error", "count"),
+        mean_error=("localization_error", "mean"),
+        median_error=("localization_error", "median"),
+        det_rate=("localization_error", lambda x: (x <= 15.0).mean() * 100),
+        mean_reliability=("reliability_score", "mean"),
+    ).reset_index()
+
+    print(f"\nPhantoms evaluated: {len(phantom_stats)}")
+    print(f"Scans per phantom: min={phantom_stats['n_scans'].min()}, "
+          f"max={phantom_stats['n_scans'].max()}, "
+          f"mean={phantom_stats['n_scans'].mean():.1f}")
+
+    print(f"\n--- Per-Phantom Localization ---")
+    print(f"  Mean of phantom mean errors:   {phantom_stats['mean_error'].mean():.2f} mm")
+    print(f"  Median of phantom mean errors: {phantom_stats['mean_error'].median():.2f} mm")
+    print(f"  Std across phantoms:           {phantom_stats['mean_error'].std():.2f} mm")
+
+    print(f"\n--- Per-Phantom Detection Rate ---")
+    print(f"  Mean det rate across phantoms: {phantom_stats['det_rate'].mean():.1f}%")
+    print(f"  Phantoms with det rate > 0%:   {(phantom_stats['det_rate'] > 0).sum()}/{len(phantom_stats)}")
+
+    print(f"\n--- Per-Phantom Reliability ---")
+    print(f"  Mean reliability across phantoms: {phantom_stats['mean_reliability'].mean():.4f}")
+
+    # Simpan ke CSV
+    phantom_stats.to_csv(out_dir / "phantom_level_stats.csv", index=False)
+    print(f"\nPhantom-level stats saved to {out_dir / 'phantom_level_stats.csv'}")
+
+    # === CORRELATION AT PHANTOM LEVEL ===
+    from scipy.stats import spearmanr, pearsonr
+    p_rel = phantom_stats["mean_reliability"].to_numpy()
+    p_err = phantom_stats["mean_error"].to_numpy()
+    valid_p = ~(np.isnan(p_rel) | np.isnan(p_err))
+
+    if valid_p.sum() > 2:
+        rho_p, p_rho_p = spearmanr(p_rel[valid_p], p_err[valid_p])
+        r_p, p_r_p = pearsonr(p_rel[valid_p], p_err[valid_p])
+        print(f"\n--- Phantom-Level Correlation ---")
+        print(f"  Spearman rho: {rho_p:+.3f} (p={p_rho_p:.4f}), N={valid_p.sum()}")
+        print(f"  Pearson r:    {r_p:+.3f} (p={p_r_p:.4f})")
+    # === END STRATIFIED COHORT ===
+    
     # 2. Threshold Analysis
     thresh_df = analyze_thresholds(df)
     thresh_df.to_csv(out_dir / "threshold_analysis.csv", index=False)
@@ -352,6 +432,27 @@ def main() -> None:
             f"{r['loc_detection_rate_pct']:<7.1f}% | "
             f"[{r['ci_lower']:.2f}-{r['ci_upper']:.2f}]"
         )
+        
+        # 3. Print Complete Summary
+    # ... existing summary code ...
+
+    # === PERMUTATION TEST ===
+    perm_p = run_permutation_test(df, n_top=50, n_perm=10000)
+
+    # === CONFUSION MATRIX WITH DATA-ADAPTIVE THRESHOLDS ===
+    rel_high = float(df["reliability_score"].quantile(0.67))
+    rel_low = float(df["reliability_score"].quantile(0.33))
+    
+    acc = df["localization_error"] <= 15.0
+    high = df["reliability_score"] >= rel_high
+    low = df["reliability_score"] < rel_low
+    
+    print(f"\n--- Confusion Matrix (adaptive thresholds: high>={rel_high:.4f}, low<{rel_low:.4f}) ---")
+    print(f"  TP (accurate + high rel):        {int((acc & high).sum())}")
+    print(f"  Fortuitous (accurate + low rel): {int((acc & low).sum())}")
+    print(f"  TN (inaccurate + low rel):       {int((~acc & low).sum())}")
+    print(f"  FP (inaccurate + high rel):      {int((~acc & high).sum())}")
+    print(f"  Unclassified (medium rel):       {int((~high & ~low).sum())}")
         
     acc = df["localization_error"] <= 15.0
     high = df["reliability_score"] >= 0.70

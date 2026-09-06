@@ -15,6 +15,8 @@ import pandas as pd
 from scipy import ndimage
 from scipy.signal import butter, sosfilt
 from joblib import Parallel, delayed
+from src.pipeline import reconstruct_scan
+import rrs_mbi.metrics as rmx
 
 from src.data_loading import load_all_data
 from select_phantoms import build_phantom_table, stratified_select
@@ -411,145 +413,95 @@ def largest_blob_localize_and_score(img, axis_mm, grid_radius_mm, gt_x_mm, gt_y_
 
 def reconstruct_and_score_all_variants(scan_idx, s21, tumor_model, id_to_original_idx, verbose=False, use_tvsvd=False):
     """
-    IMPROVED PHYSICS PIPELINE:
-    1. Effective Velocity (Fat/Fib composition)
-    2. Bandpass Filter (4-6 GHz) based on Isabel Olaya Lopez (2024)
-    3. Snellius-Corrected Delay Grid
-    4. Depth Gain Compensation
+    UPDATED: Uses the new reconstruct_scan() pipeline from src.pipeline
+    Ensures consistency with coords_check.py and modern scripts.
     """
+    from src.pipeline import reconstruct_scan
+    import rrs_mbi.metrics as rmx
+    
     row = tumor_model.iloc[scan_idx]
-    breast_radius_mm = float(row["breast_radius_mm"])
     
-    # 1. EFFECTIVE VELOCITY CALCULATION
-    fat_frac = float(row["fat_fraction"])
-    fib_frac = float(row["fib_fraction"])
-    v_tissue, _ = physics.compute_effective_velocity(fat_frac, fib_frac)
-
-    ant_rad_mm = float(row.get("ant_rad", 21.5)) * 10.0
-    geom = physics.get_antenna_geometry(ant_rad_mm)
-
-    s21_idx = int(row["original_s21_idx"])
-    fd_scan = s21[s21_idx]
+    # Call the unified pipeline
+    result = reconstruct_scan(
+        scan_idx=int(scan_idx),
+        s21=s21,
+        tumor_model=tumor_model,
+        id_to_original_idx=id_to_original_idx,
+        freq_axis=freq_axis,
+        use_tvsvd=use_tvsvd,
+        use_rms_norm=True,
+        bandpass_mode="full",  # 4-6 GHz bandpass
+        gate_ns=0.5,
+        return_diagnostics=True
+    )
     
-    # Calibration (Original Logic)
-    emp_ref_id = row.get("emp_ref_id", None)
-    calibration_applied = False
-    if emp_ref_id is not None and not pd.isna(emp_ref_id) and int(emp_ref_id) in id_to_original_idx:
-        emp_idx = id_to_original_idx[int(emp_ref_id)]
-        fd_scan = fd_scan - s21[emp_idx]
-        calibration_applied = True
-
+    # Extract key outputs
+    gt_x_mm = result["gt_x_mm"]
+    gt_y_mm = result["gt_y_mm"]
+    img_raw = result["diagnostics"]["image"]
+    axis_mm = result["diagnostics"]["axis_mm"]
+    cf_val = result.get("cf_at_peak", None)
+    
+    # Calculate reliability metrics for candidate features
+    rel_dict = rmx.evaluate_scan_reliability(
+        img_raw, 
+        axis_mm=axis_mm,
+        cf_at_peak=cf_val,
+        saturation_radius_mm=5.0
+    )
+    
+    # Build results dict to match old format (only DAS+CF variant now)
+    results = {
+        "DAS+CF": {
+            "localization_error_mm": result["localization_error_mm"],
+            "scr_db": result.get("scr_db", 0.0),
+            "on_edge": result.get("on_edge", False)
+        }
+    }
+    
+    # Diagnostic info
     diag = dict(
-        original_s21_idx=s21_idx,
-        old_buggy_idx=scan_idx,
-        idx_drift=s21_idx - scan_idx,
-        calibration_applied=calibration_applied,
+        original_s21_idx=result.get("original_s21_idx", scan_idx),
+        calibration_applied=result.get("calibration_applied", False),
         phant_id=row["phant_id"],
-        gt_x_mm=float(row["tumor_x_mm"]),
-        gt_y_mm=float(row["tumor_y_mm"]),
-        breast_radius_mm=breast_radius_mm,
+        gt_x_mm=gt_x_mm,
+        gt_y_mm=gt_y_mm,
+        breast_radius_mm=float(row["breast_radius_mm"]),
         tum_in_fib=row.get("tum_in_fib", np.nan),
     )
-
-    # 2. BANDPASS FILTER (4-6 GHz)
-    # Based on Isabel Olaya Lopez: "almost all discriminative power to the four-to-six gigahertz sub-band"
-    fd_scan_filtered = apply_bandpass_filter(fd_scan, freq_axis, low_cut=4e9, high_cut=6e9)
-
-    # Time Domain Transform
-    time_signal = sp.to_time_domain(fd_scan_filtered)
     
-    # Optional: TVSVD
-    n_sv_removed = 0
-    if use_tvsvd:
-        time_signal, n_sv_removed = sp.apply_hybrid_tvsvd(time_signal)
-
-    time_axis = sp.get_time_axis(time_signal.shape[0])
-    td_mag = np.abs(time_signal)
-
-    # Grid Setup
-    grid_x_mm, grid_y_mm, axis_mm, grid_radius_mm = build_grid(breast_radius_mm)
-    grid_x_m = grid_x_mm.ravel() / 1000.0
-    grid_y_m = grid_y_mm.ravel() / 1000.0
-
-    # 3. SNELLIUS-CORRECTED DELAY GRID
-    # Replaces two_medium_delay/bent_ray_3layer_delay for geometric precision
-    delay_grid = physics.snellius_corrected_delay(
-        geom["ant_x"], geom["ant_y"], 
-        grid_x_m, grid_y_m,
-        breast_radius_mm / 1000.0, v_tissue
-    )
-    delay_grid = delay_grid.reshape(-1, *grid_x_mm.shape)
-
-    # 4. DEPTH GAIN COMPENSATION
-    # Equalizes signal strength across depth to aid deep-tumor detection
-    time_signal = apply_depth_gain(time_signal, delay_grid)
-
-    gt_x_mm = float(row["tumor_x_mm"])
-    gt_y_mm = float(row["tumor_y_mm"])
-
-    # Beamforming Variants (Using improved time_signal)
-    images = {
-        "Raw DAS": bf.das_coherent(time_signal, time_axis, delay_grid),
-        "Raw DMAS": bf.dmas(td_mag, time_axis, delay_grid),
-    }
-    das_image_raw, cf_map, das_cf_img = bf.das_coherent_cf(time_signal, time_axis, delay_grid)
-    images["DAS+CF"] = das_cf_img
-    
-    dmas_image_raw = bf.dmas(td_mag, time_axis, delay_grid)
-    dmas_cf_img, _ = bf.dmas_cf(time_signal, td_mag, time_axis, delay_grid)
-    images["DMAS+CF"] = dmas_cf_img
-
-    # CF Debiasing (Original Logic)
-    n_ant = time_signal.shape[1]
-    baseline_mean, baseline_std = get_cf_baseline_cached(row["phant_id"], delay_grid, time_axis, n_ant)
-    
-    cf_sub = debias_cf_subtraction(cf_map, baseline_mean)
-    cf_ratio = debias_cf_ratio(cf_map, baseline_mean)
-    cf_zscore = debias_cf_zscore(cf_map, baseline_mean, baseline_std)
-
-    images["DAS+CF-debiased-sub"] = das_image_raw * cf_sub
-    images["DAS+CF-debiased-ratio"] = das_image_raw * cf_ratio
-    images["DAS+CF-debiased-zscore"] = das_image_raw * cf_zscore
-    images["DMAS+CF-debiased-sub"] = dmas_image_raw * cf_sub
-    images["DMAS+CF-debiased-ratio"] = dmas_image_raw * cf_ratio
-    images["DMAS+CF-debiased-zscore"] = dmas_image_raw * cf_zscore
-
-    # DAS Magnitude Debiassing (Original Logic)
-    das_baseline_mean, das_baseline_std = get_das_baseline_cached(row["phant_id"], delay_grid, time_axis, n_ant)
-    real_energy = float(np.mean(das_image_raw[das_image_raw > 0])) if np.any(das_image_raw > 0) else 1.0
-    baseline_energy = float(np.mean(das_baseline_mean[das_baseline_mean > 0])) if np.any(das_baseline_mean > 0) else 1.0
-    amplitude_scale = real_energy / (baseline_energy + 1e-10)
-    
-    das_debiased_z = debias_das_zscore(das_image_raw, das_baseline_mean * amplitude_scale, das_baseline_std * amplitude_scale)
-    das_debiased_r = debias_das_ratio(das_image_raw, das_baseline_mean)
-    das_combined = das_debiased_z * cf_zscore
-
-    images["DAS-debiased-zscore"] = das_debiased_z
-    images["DAS-debiased-ratio"] = das_debiased_r
-    images["DAS-debiased+CF-zscore"] = das_combined
-
-    # Scoring and Candidate Generation
-    CENTROID_TEST_VARIANTS = ("Raw DAS", "DAS+CF", "DAS+CF-debiased-zscore")
-    results = {}
-    for name, img in images.items():
-        le, scr, on_edge, px, py = argmax_localize_and_score(img, axis_mm, grid_radius_mm, gt_x_mm, gt_y_mm)
-        results[name] = dict(localization_error_mm=le, scr_db=scr, on_edge=on_edge)
-
-        le_m, scr_m, on_edge_m, px_m, py_m = argmax_localize_and_score(img, axis_mm, grid_radius_mm, gt_x_mm, gt_y_mm, exclude_center_radius_mm=CENTER_EXCLUDE_RADIUS_MM)
-        results[f"{name} (masked)"] = dict(localization_error_mm=le_m, scr_db=scr_m, on_edge=on_edge_m)
-
-        if name in CENTROID_TEST_VARIANTS:
-            le_c, scr_c, on_edge_c, px_c, py_c = weighted_centroid_localize_and_score(img, axis_mm, grid_radius_mm, gt_x_mm, gt_y_mm)
-            results[f"{name} (centroid)"] = dict(localization_error_mm=le_c, scr_db=scr_c, on_edge=on_edge_c)
-            
-            le_b, scr_b, on_edge_b, px_b, py_b = largest_blob_localize_and_score(img, axis_mm, grid_radius_mm, gt_x_mm, gt_y_mm)
-            results[f"{name} (largest-blob)"] = dict(localization_error_mm=le_b, scr_db=scr_b, on_edge=on_edge_b)
-
-    # Candidate Generation for SVM
+    # Generate candidates for SVM training
     birads = row.get("birads", np.nan)
-    candidates = generate_candidates(images["DAS+CF"], cf_map, axis_mm, gt_x_mm, gt_y_mm, shell_center_mm=(0.0, 0.0), birads=birads, breast_radius_mm=breast_radius_mm, phant_id=row["phant_id"])
-    candidates_k10 = generate_candidates(images["DAS+CF"], cf_map, axis_mm, gt_x_mm, gt_y_mm, shell_center_mm=(0.0, 0.0), birads=birads, breast_radius_mm=breast_radius_mm, phant_id=row["phant_id"], k=10)
-
+    breast_radius_mm = float(row["breast_radius_mm"])
+    
+    # Create CF map placeholder if needed
+    cf_map = np.ones_like(img_raw) if cf_val is None else img_raw * cf_val
+    
+    candidates = generate_candidates(
+        img=img_raw,
+        cf_map=cf_map,
+        axis_mm=axis_mm,
+        gt_x_mm=gt_x_mm,
+        gt_y_mm=gt_y_mm,
+        shell_center_mm=(0.0, 0.0),
+        birads=birads,
+        breast_radius_mm=breast_radius_mm,
+        phant_id=row["phant_id"]
+    )
+    
+    candidates_k10 = generate_candidates(
+        img=img_raw,
+        cf_map=cf_map,
+        axis_mm=axis_mm,
+        gt_x_mm=gt_x_mm,
+        gt_y_mm=gt_y_mm,
+        shell_center_mm=(0.0, 0.0),
+        birads=birads,
+        breast_radius_mm=breast_radius_mm,
+        phant_id=row["phant_id"],
+        k=10
+    )
+    
     return results, diag, candidates, candidates_k10
 
 # ============================================================================
@@ -579,6 +531,7 @@ def main():
     d = load_all_data()
     s21, tumor_model = d["s21"], d["tumor_model"]
     id_to_original_idx = d["id_to_original_idx"]
+    freq_axis = d["freq_axis"]  # <-- Tambahin ini biar bisa dipake di fungsi lain
 
     # Restrict to the stratified phantom subset
     if args.n_phantoms > 0:
@@ -665,21 +618,23 @@ def main():
     if failed:
         print(f"\n{len(failed)} scans failed. First failure: {failed[0]}")
 
-    # ========================================================================
+        # ========================================================================
     # DIAGNOSTICS & SUMMARY
     # ========================================================================
-    print("\n" + "=" * 70)
-    print("DIAGNOSTIC: index alignment fix + calibration engagement")
-    print("=" * 70)
+
+    print("\n" + "="*70)
+    print("DIAGNOSTIC: Pipeline execution summary")
+    print("="*70)
+
     diag_df = pd.DataFrame(diag_rows)
     if len(diag_df) > 0:
-        n_drifted = (diag_df["idx_drift"] != 0).sum()
-        print(f"Scans where original_s21_idx differs from the old buggy index : "
-              f"{n_drifted}/{len(diag_df)}")
-        print(f"  mean |drift|  : {diag_df['idx_drift'].abs().mean():.1f}")
-        n_calibrated = diag_df["calibration_applied"].sum()
-        print(f"Scans where empty-chamber calibration was actually applied : "
-              f"{n_calibrated}/{len(diag_df)}")
+        n_calibrated = diag_df["calibration_applied"].sum() if "calibration_applied" in diag_df.columns else 0
+        print(f"Total scans processed: {len(diag_df)}")
+        print(f"Scans with calibration applied: {n_calibrated}/{len(diag_df)}")
+        if "phant_id" in diag_df.columns:
+            print(f"Unique phantoms: {diag_df['phant_id'].nunique()}")
+    else:
+        print("No diagnostic data available.")
 
     print("\n" + "=" * 70)
     print("BASELINE ARGMAX TEST — SUMMARY (Improved Physics Stack)")

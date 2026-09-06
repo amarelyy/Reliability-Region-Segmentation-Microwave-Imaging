@@ -232,31 +232,40 @@ def main():
         print(f"Min GT Distance: {df['gt_dist_center'].min():.2f} mm")
         
         print(f"\n--- Confusion Matrix (Reliability vs Accuracy) ---")
-        total_classified = sum(stats.values())
+        # Data-adaptive thresholds from actual distribution
+        rel_high = float(df["reliability"].quantile(0.67))
+        rel_low = float(df["reliability"].quantile(0.33))
         
-        # Fungsi pembantu anti-crash
+        is_acc = df["error"] <= ERROR_THRESH_MM
+        is_hi = df["reliability"] >= rel_high
+        is_lo = df["reliability"] < rel_low
+        
+        tp = int((is_acc & is_hi).sum())
+        fort = int((is_acc & is_lo).sum())
+        tn = int((~is_acc & is_lo).sum())
+        fp = int((~is_acc & is_hi).sum())
+        medium = len(df) - tp - fort - tn - fp
+        total_classified = tp + fort + tn + fp
+        
         def safe_pct(num, den):
             return f"{num/den*100:.1f}%" if den > 0 else "N/A"
 
-        print(f"True Positives (Accurate + High Rel):      {stats['TP']:>4} ({safe_pct(stats['TP'], total_classified)})")
-        print(f"Fortuitous     (Accurate + Low Rel):       {stats['Fortuitous']:>4} ({safe_pct(stats['Fortuitous'], total_classified)})")
-        print(f"True Negatives (Inaccurate + Low Rel):     {stats['TN']:>4} ({safe_pct(stats['TN'], total_classified)})")
-        print(f"False Positives(Inaccurate + High Rel):    {stats['FP']:>4} ({safe_pct(stats['FP'], total_classified)})")
-        print(f"Medium/Unclassified:                       {n_scans - total_classified:>4}")
+        print(f"Thresholds: high >= {rel_high:.4f}, low < {rel_low:.4f}")
+        print(f"True Positives (Accurate + High Rel):      {tp:>4} ({safe_pct(tp, total_classified)})")
+        print(f"Fortuitous     (Accurate + Low Rel):       {fort:>4} ({safe_pct(fort, total_classified)})")
+        print(f"True Negatives (Inaccurate + Low Rel):     {tn:>4} ({safe_pct(tn, total_classified)})")
+        print(f"False Positives(Inaccurate + High Rel):    {fp:>4} ({safe_pct(fp, total_classified)})")
+        print(f"Medium/Unclassified:                       {medium:>4}")
         
-        # --- DEBUG INFO FALLBACK ---
         if total_classified == 0:
             print("\n[WARNING] Reliability score is NaN for ALL scans!")
-            print("Metrics.py might be returning D and B under different key names.")
-            print(f"Here are all the keys returned by reconstruct_scan for the first scan:")
-            print(first_scan_keys)
         else:
             print("\n[INTERPRETASI]")
-            if stats['Fortuitous'] > 0:
-                print(f"-> Ditemukan {stats['Fortuitous']} scan yang AKURAT tapi ditandai LOW RELIABILITY.")
-                print("   Ini memvalidasi bahwa RRS-MBI mendeteksi 'kebetulan geometris'.")
-            if stats['FP'] > 0:
-                print(f"-> WARNING: {stats['FP']} scan TIDAK AKURAT tapi ditandai HIGH RELIABILITY.")
+            if fort > 0:
+                print(f"-> Ditemukan {fort} scan yang AKURAT tapi ditandai LOW RELIABILITY.")
+            if fp > 0:
+                print(f"-> WARNING: {fp} scan TIDAK AKURAT tapi ditandai HIGH RELIABILITY.")
+        print(f"-> WARNING: {stats['FP']} scan TIDAK AKURAT tapi ditandai HIGH RELIABILITY.")
                 
     print("\n[4/4] Done.")
 

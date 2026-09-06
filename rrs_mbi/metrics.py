@@ -79,8 +79,7 @@ def calculate_boundary_artifact_risk(image: np.ndarray, mask: np.ndarray, bounda
     return float(min(1.0, energy_boundary / energy_total))
 
 
-def calculate_geometric_plausibility(image: np.ndarray, axis_mm: Optional[np.ndarray],
-                                     saturation_radius_mm: float = 5.0) -> float:
+def calculate_geometric_plausibility(image, axis_mm, saturation_radius_mm=20.0):
     """
     NEW — Geometric-plausibility prior.
 
@@ -100,28 +99,46 @@ def calculate_geometric_plausibility(image: np.ndarray, axis_mm: Optional[np.nda
     peak_y = float(axis_mm[peak_iy])
     pred_dist = float(np.hypot(peak_x, peak_y))
 
-    return float(min(1.0, pred_dist / saturation_radius_mm)**2)
+    return float(min(1.0, pred_dist / saturation_radius_mm))
 
+def calculate_central_concentration(image, mask, axis_mm):
+    """Fraksi energi dalam radius 10mm dari pusat. Tinggi = artifact dominan."""
+    if axis_mm is None or not np.any(mask):
+        return 0.5
+    Y, X = np.meshgrid(axis_mm, axis_mm, indexing='ij')
+    dist = np.sqrt(X**2 + Y**2)
+    center_mask = mask & (dist <= 10.0)
+    if not np.any(center_mask):
+        return 0.0
+    e_center = float(np.sum(image[center_mask]**2))
+    e_total = float(np.sum(image[mask]**2)) + 1e-10
+    return min(1.0, e_center / e_total)
 
-def evaluate_scan_reliability(image: np.ndarray, axis_mm=None, cf_at_peak=None,
-                              saturation_radius_mm: float = 5.0) -> Dict[str, float]:
+def evaluate_scan_reliability(image, axis_mm=None, cf_at_peak=None,
+                              saturation_radius_mm=20.0) -> Dict[str, float]:
     mask = extract_breast_mask(image)
     dominance = calculate_peak_dominance(image, mask)
-    risk = calculate_boundary_artifact_risk(image, mask)
+
+    # FIX Issue 2: central concentration menggantikan boundary_risk
+    cc = calculate_central_concentration(image, mask, axis_mm)
+
+    # FIX Issue 3: saturation 20mm, linear ramp
     geo = calculate_geometric_plausibility(image, axis_mm, saturation_radius_mm)
 
-    # CF-at-peak component (if available)
+    # FIX Issue 4: normalized CF dengan floor 0.1
     cf_factor = 1.0
     if cf_at_peak is not None and not np.isnan(cf_at_peak):
-        cf_factor = float(np.clip(cf_at_peak, 0.0, 1.0))
+        cf_normalized = (float(cf_at_peak) - 0.1) / 0.7
+        cf_factor = float(np.clip(cf_normalized, 0.1, 1.0))
 
     norm_dominance = min(1.0, dominance / 5.0)
-    reliability = float(norm_dominance * (1.0 - risk) * geo * cf_factor)
+    reliability = float(norm_dominance * (1.0 - cc) * geo * cf_factor)
 
     return {
         "peak_dominance": float(dominance),
-        "boundary_risk": float(risk),
+        "central_concentration": float(cc),
         "geo_plausibility": float(geo),
         "cf_at_peak": float(cf_at_peak) if cf_at_peak is not None else float("nan"),
+        "cf_factor": float(cf_factor),
         "reliability_score": reliability
     }
