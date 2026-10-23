@@ -160,6 +160,10 @@ def main():
     print(f"\nRunning {args.n_splits}-fold GroupKFold CV (grouped by phant_id, "
           f"NOT scan_idx — see module docstring)...")
     df, fold_aucs = run_grouped_cv(df, n_splits=args.n_splits, seed=args.seed)
+    
+    # Save scored candidates for figure generation
+    save_scored_candidates(args.candidates, "svm_candidates_scored.csv",
+                           n_splits=args.n_splits, seed=args.seed)
 
     if fold_aucs:
         print(f"\nMean out-of-fold AUC across folds: {np.mean(fold_aucs):.3f} "
@@ -169,6 +173,32 @@ def main():
 
     direct_le_comparison(df)
     print_feature_weights(df, seed=args.seed)
+    
+def save_scored_candidates(candidates_path, output_path, n_splits=5, seed=42):
+    """Re-run GroupKFold CV and save candidates with out-of-fold SVM scores."""
+    import pandas as pd
+    from sklearn.svm import SVC
+    from sklearn.model_selection import GroupKFold
+    
+    df = pd.read_csv(candidates_path)
+    feature_cols = ["cf_at_peak", "cf_background_ratio", "area_fraction",
+                    "dist_to_ring_center_ratio", "local_scr_db", "hessian_eigenratio"]
+    
+    X = df[feature_cols].to_numpy()
+    y = df["label"].to_numpy()
+    groups = df["phant_id"].to_numpy()
+    
+    gkf = GroupKFold(n_splits=min(n_splits, len(set(groups))))
+    oof_scores = np.full(len(df), np.nan)
+    
+    for train_idx, test_idx in gkf.split(X, y, groups):
+        clf = SVC(kernel="linear", C=1.0)
+        clf.fit(X[train_idx], y[train_idx])
+        oof_scores[test_idx] = clf.decision_function(X[test_idx])
+    
+    df["oof_score"] = oof_scores
+    df.to_csv(output_path, index=False)
+    print(f"Saved {len(df)} scored candidates to {output_path}")
 
 
 if __name__ == "__main__":

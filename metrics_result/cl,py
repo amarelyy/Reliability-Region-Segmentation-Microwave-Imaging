@@ -1,0 +1,80 @@
+"""Figure 3: Selective classification with 95% CI shading."""
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib
+
+matplotlib.rcParams.update({
+    'font.family': 'Times New Roman',
+    'font.size': 12,
+    'mathtext.fontset': 'stix',
+    'axes.labelsize': 13,
+    'axes.titlesize': 14,
+    'xtick.labelsize': 11,
+    'ytick.labelsize': 11,
+    'legend.fontsize': 10,
+})
+
+
+def plot_selective_ci(metrics_path="rrs_mbi/results/metrics_raw.csv",
+                      save_path="selective_classification_ci.png"):
+    df = pd.read_csv(metrics_path)
+    rel = df["reliability_score"].to_numpy(dtype=float)
+    err = df["localization_error"].to_numpy(dtype=float)
+    valid = ~(np.isnan(rel) | np.isnan(err))
+    rel, err = rel[valid], err[valid]
+
+    sorted_idx = np.argsort(-rel)
+    ratios = np.array([1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1])
+
+    means, lo, hi, det_rates = [], [], [], []
+    for r in ratios:
+        n_keep = max(1, int(len(rel) * r))
+        subset = err[sorted_idx[:n_keep]]
+        m = subset.mean()
+        se = subset.std(ddof=1) / np.sqrt(n_keep) if n_keep > 1 else 0
+        ci = 1.96 * se
+        means.append(m)
+        lo.append(m - ci)
+        hi.append(m + ci)
+        det_rates.append((subset <= 15).mean() * 100)
+
+    fig, ax1 = plt.subplots(figsize=(9, 5.5))
+
+    # CI shading
+    ax1.fill_between(ratios * 100, lo, hi, alpha=0.2, color='steelblue', label='95% CI')
+    line1 = ax1.plot(ratios * 100, means, 'o-', color='steelblue', linewidth=2,
+                     markersize=6, label='Mean LE')
+    ax1.set_xlabel("Retention Ratio (%)")
+    ax1.set_ylabel("Mean Localization Error (mm)", color='steelblue')
+    ax1.tick_params(axis='y', labelcolor='steelblue')
+
+    # Baseline reference
+    full_mean = err.mean()
+    full_se = err.std(ddof=1) / np.sqrt(len(err))
+    full_ci = 1.96 * full_se
+    ax1.axhline(y=full_mean, color='grey', linestyle=':', linewidth=1.5,
+                label=f'Baseline ({full_mean:.1f} mm)')
+    ax1.axhspan(full_mean - full_ci, full_mean + full_ci, alpha=0.08, color='grey')
+
+    # Detection rate on secondary axis
+    ax2 = ax1.twinx()
+    line2 = ax2.plot(ratios * 100, det_rates, 's--', color='darkorange',
+                     linewidth=2, markersize=6, label='Detection @15mm')
+    ax2.set_ylabel("Detection Rate @15mm (%)", color='darkorange')
+    ax2.tick_params(axis='y', labelcolor='darkorange')
+
+    lines = line1 + line2
+    labels = [l.get_label() for l in lines]
+    ax1.legend(lines, labels, loc='center right')
+
+    ax1.set_title("Selective Classification Performance with 95% CI")
+    ax1.set_xlim(10, 100)
+    plt.tight_layout()
+    fig.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"Saved: {save_path}")
+    plt.close(fig)
+
+
+if __name__ == "__main__":
+    plot_selective_ci()
