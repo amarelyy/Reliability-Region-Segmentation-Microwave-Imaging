@@ -1,0 +1,10 @@
+using src from: C:\Users\ASUSTU~1\AppData\Local\Temp\claude\d--Reliability-Region-Segmentation-Microwave-Imaging\e11e748f-dd13-4ac6-b571-146871a75e86\scratchpad\baseline_code\src
+[data_loading] 285 rows missing phantom_database.csv match — attempting fallback-table backfill...
+[data_loading] backfill recovered 144 rows; 141 still unmatched.
+[data_loading] tumor columns detected in cm -> converting to mm
+[data_loading] s21 scans: 1301  |  tumor_model rows: 504  |  usable range: 0..503
+[data_loading] Reconstructed freq_axis: 1001 points from 1-8 GHz
+  1/141
+  51/141
+  101/141
+saved results_audit\baseline\cache\recon_adipose.npz 141

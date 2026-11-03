@@ -1,0 +1,59 @@
+[data_loading] 285 rows missing phantom_database.csv match — attempting fallback-table backfill...
+[data_loading] backfill recovered 144 rows; 141 still unmatched.
+[data_loading] tumor columns detected in cm -> converting to mm
+[data_loading] s21 scans: 1301  |  tumor_model rows: 504  |  usable range: 0..503
+[data_loading] Reconstructed freq_axis: 1001 points from 1-8 GHz
+  caching 1/504
+  caching 51/504
+  caching 101/504
+  caching 151/504
+  caching 201/504
+  caching 251/504
+  caching 301/504
+  caching 351/504
+  caching 401/504
+  caching 451/504
+  caching 501/504
+train 401 scans / 52 phantoms | val 103 scans / 14 phantoms
+Epoch [1/20] - Train Loss: 0.6293 | Val Loss: 0.5693
+Epoch [2/20] - Train Loss: 0.5354 | Val Loss: 0.5274
+Epoch [3/20] - Train Loss: 0.5192 | Val Loss: 0.5130
+Epoch [4/20] - Train Loss: 0.5108 | Val Loss: 0.5108
+Epoch [5/20] - Train Loss: 0.5057 | Val Loss: 0.5064
+Epoch [6/20] - Train Loss: 0.5021 | Val Loss: 0.5394
+Epoch [7/20] - Train Loss: 0.5037 | Val Loss: 0.5046
+Epoch [8/20] - Train Loss: 0.4983 | Val Loss: 0.5098
+Epoch [9/20] - Train Loss: 0.4960 | Val Loss: 0.5085
+Epoch [10/20] - Train Loss: 0.4936 | Val Loss: 0.5047
+Epoch [11/20] - Train Loss: 0.4951 | Val Loss: 0.5131
+Epoch [12/20] - Train Loss: 0.4890 | Val Loss: 0.5056
+Epoch [13/20] - Train Loss: 0.4886 | Val Loss: 0.5113
+Epoch [14/20] - Train Loss: 0.4898 | Val Loss: 0.5052
+Epoch [15/20] - Train Loss: 0.4847 | Val Loss: 0.5076
+Epoch [16/20] - Train Loss: 0.4863 | Val Loss: 0.5270
+Epoch [17/20] - Train Loss: 0.4869 | Val Loss: 0.5075
+Epoch [18/20] - Train Loss: 0.4861 | Val Loss: 0.5051
+Epoch [19/20] - Train Loss: 0.4840 | Val Loss: 0.5177
+Epoch [20/20] - Train Loss: 0.4822 | Val Loss: 0.5071
+D:\Reliability-Region-Segmentation-Microwave-Imaging\unet\evaluate_unet.py:229: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
+[data_loading] 285 rows missing phantom_database.csv match — attempting fallback-table backfill...
+[data_loading] backfill recovered 144 rows; 141 still unmatched.
+[data_loading] tumor columns detected in cm -> converting to mm
+[data_loading] s21 scans: 1301  |  tumor_model rows: 504  |  usable range: 0..503
+[data_loading] Reconstructed freq_axis: 1001 points from 1-8 GHz
+          dice  precision    recall
+mean  0.084971   0.080723  0.135770
+std   0.167542   0.158699  0.268508
+pred_pixels          508.5146
+unet_LE_mm            37.0580
+unet_dice              0.0850
+unet_iou               0.0543
+unet_accuracy          0.9550
+unet_precision         0.0807
+unet_recall            0.1358
+unet_f1                0.0850
+allones_dice           0.0448
+allones_precision      0.0236
+det@15mm from U-Net mask centroid: 19.4%
+scans with empty predicted mask: 21

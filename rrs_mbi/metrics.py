@@ -32,13 +32,14 @@ def extract_breast_mask(image: np.ndarray, threshold_percentile: float = 15.0) -
     return (labeled_mask == largest_component).astype(bool)
 
 
-def calculate_peak_dominance(image: np.ndarray, mask: np.ndarray) -> float:
+def calculate_peak_dominance(image: np.ndarray, mask: np.ndarray, peak_coords=None) -> float:
+    """peak_coords: (iy, ix) of the predicted point; None = global argmax."""
     if not np.any(mask):
         return 0.0
 
-    peak_val = float(np.max(image))
-    peak_idx = int(np.argmax(image))
-    peak_coords = np.unravel_index(peak_idx, image.shape)
+    if peak_coords is None:
+        peak_coords = np.unravel_index(int(np.argmax(image)), image.shape)
+    peak_val = float(image[peak_coords])
     
     y, x = np.ogrid[:image.shape[0], :image.shape[1]]
     exclusion_zone = ((y - peak_coords[0])**2 + (x - peak_coords[1])**2) <= 25
@@ -79,7 +80,8 @@ def calculate_boundary_artifact_risk(image: np.ndarray, mask: np.ndarray, bounda
     return float(min(1.0, energy_boundary / energy_total))
 
 
-def calculate_geometric_plausibility(image, axis_mm, saturation_radius_mm=20.0):
+def calculate_geometric_plausibility(image, axis_mm, saturation_radius_mm=20.0,
+                                     peak_xy=None, center_xy=(0.0, 0.0)):
     """
     NEW — Geometric-plausibility prior.
 
@@ -90,23 +92,25 @@ def calculate_geometric_plausibility(image, axis_mm, saturation_radius_mm=20.0):
     saturates to 1.0 once the peak is beyond `saturation_radius_mm`.
 
     Uses only general imaging-geometry knowledge (NOT per-scan ground truth).
+    peak_xy: predicted point in mm (None = global argmax); distance is measured from
+    center_xy (the array/shell centre), in mm.
     """
     if axis_mm is None:
         return 1.0
 
-    peak_iy, peak_ix = np.unravel_index(np.argmax(image), image.shape)
-    peak_x = float(axis_mm[peak_ix])
-    peak_y = float(axis_mm[peak_iy])
-    pred_dist = float(np.hypot(peak_x, peak_y))
+    if peak_xy is None:
+        peak_iy, peak_ix = np.unravel_index(np.argmax(image), image.shape)
+        peak_xy = (float(axis_mm[peak_ix]), float(axis_mm[peak_iy]))
+    pred_dist = float(np.hypot(peak_xy[0] - center_xy[0], peak_xy[1] - center_xy[1]))
 
     return float(min(1.0, pred_dist / saturation_radius_mm))
 
-def calculate_central_concentration(image, mask, axis_mm):
-    """Fraksi energi dalam radius 10mm dari pusat. Tinggi = artifact dominan."""
+def calculate_central_concentration(image, mask, axis_mm, center_xy=(0.0, 0.0)):
+    """Fraksi energi dalam radius 10mm dari pusat (center_xy, mm). Tinggi = artifact dominan."""
     if axis_mm is None or not np.any(mask):
         return 0.5
     Y, X = np.meshgrid(axis_mm, axis_mm, indexing='ij')
-    dist = np.sqrt(X**2 + Y**2)
+    dist = np.sqrt((X - center_xy[0])**2 + (Y - center_xy[1])**2)
     center_mask = mask & (dist <= 10.0)
     if not np.any(center_mask):
         return 0.0
@@ -115,15 +119,23 @@ def calculate_central_concentration(image, mask, axis_mm):
     return min(1.0, e_center / e_total)
 
 def evaluate_scan_reliability(image, axis_mm=None, cf_at_peak=None,
-                              saturation_radius_mm=20.0) -> Dict[str, float]:
+                              saturation_radius_mm=20.0, peak_xy=None,
+                              center_xy=(0.0, 0.0)) -> Dict[str, float]:
+    """peak_xy: the predicted tumour point (mm) that LE and cf_at_peak refer to; D and G are
+    evaluated at the same point so every factor describes ONE prediction. None = global argmax.
+    center_xy: array/shell centre (mm) for CC and G."""
     mask = extract_breast_mask(image)
-    dominance = calculate_peak_dominance(image, mask)
+    peak_coords = None
+    if peak_xy is not None and axis_mm is not None:
+        peak_coords = (int(np.argmin(np.abs(axis_mm - peak_xy[1]))),
+                       int(np.argmin(np.abs(axis_mm - peak_xy[0]))))
+    dominance = calculate_peak_dominance(image, mask, peak_coords)
 
     # FIX Issue 2: central concentration menggantikan boundary_risk
-    cc = calculate_central_concentration(image, mask, axis_mm)
+    cc = calculate_central_concentration(image, mask, axis_mm, center_xy)
 
     # FIX Issue 3: saturation 20mm, linear ramp
-    geo = calculate_geometric_plausibility(image, axis_mm, saturation_radius_mm)
+    geo = calculate_geometric_plausibility(image, axis_mm, saturation_radius_mm, peak_xy, center_xy)
 
     # FIX Issue 4: normalized CF dengan floor 0.1
     cf_factor = 1.0

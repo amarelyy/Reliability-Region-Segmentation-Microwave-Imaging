@@ -1,0 +1,2 @@
+baseline adipose-only, UNRESTRICTED image argmax r/R: median 0.17, frac >1.0: 0.01, frac <0.25: 0.65
+fixed adipose-only, UNRESTRICTED image argmax r/R: median 0.15, frac >1.0: 0.05, frac <0.25: 0.62

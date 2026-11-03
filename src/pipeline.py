@@ -14,12 +14,30 @@ from . import signal_processing as sp
 from . import beamforming as bf
 from . import blob_detection as bd
 from . import metrics as mx
+from . import shell_geometry as sg
 from typing import Dict, Any
 
 DEFAULT_GRID_MARGIN_FACTOR = 1.5
 DEFAULT_GRID_STEP_MM = 1.0
 
-_DELAY_CACHE = {}
+from collections import OrderedDict
+_DELAY_CACHE = OrderedDict()
+_DELAY_CACHE_MAX = 8   # ~17 MB per phantom grid; keep memory bounded
+_SHELL_CACHE = {}      # adi_ref_id -> echo-estimated shell centre (mm)
+
+
+def resolve_shell_center(row, s21, id_to_original_idx):
+    """Shell centre (mm) estimated from the scan's adipose reference echo; (0, 0) if unavailable."""
+    adi_ref, emp_ref = row.get("adi_ref_id", None), row.get("emp_ref_id", None)
+    if adi_ref is None or emp_ref is None or pd.isna(adi_ref) or pd.isna(emp_ref):
+        return (0.0, 0.0)
+    a, e = id_to_original_idx.get(int(adi_ref)), id_to_original_idx.get(int(emp_ref))
+    if a is None or e is None:
+        return (0.0, 0.0)
+    if int(adi_ref) not in _SHELL_CACHE:
+        est = sg.estimate_shell_circle(s21[a], s21[e], float(row.get("ant_rad", 21.5)))
+        _SHELL_CACHE[int(adi_ref)] = (round(est["cx_mm"], 2), round(est["cy_mm"], 2))
+    return _SHELL_CACHE[int(adi_ref)]
 
 def _delay_cache_key(phant_id, use_snellius, ant_rad_mm, breast_radius_mm,
                       v_tissue, margin_factor, grid_step_mm, shell_center):
@@ -28,8 +46,9 @@ def _delay_cache_key(phant_id, use_snellius, ant_rad_mm, breast_radius_mm,
 
 
 def build_grid(breast_radius_mm, margin_factor=DEFAULT_GRID_MARGIN_FACTOR,
-                grid_step_mm=DEFAULT_GRID_STEP_MM):
-    grid_radius_mm = breast_radius_mm * margin_factor
+                grid_step_mm=DEFAULT_GRID_STEP_MM, extra_mm=0.0):
+    # extra_mm widens the (origin-centred) grid so an off-centre shell is not clipped
+    grid_radius_mm = breast_radius_mm * margin_factor + extra_mm
     axis_mm = np.arange(-grid_radius_mm, grid_radius_mm + grid_step_mm, grid_step_mm)
     grid_x_mm, grid_y_mm = np.meshgrid(axis_mm, axis_mm)
     return grid_x_mm, grid_y_mm, axis_mm, grid_radius_mm
@@ -38,13 +57,21 @@ def build_grid(breast_radius_mm, margin_factor=DEFAULT_GRID_MARGIN_FACTOR,
 def reconstruct_scan(scan_idx, s21, tumor_model, id_to_original_idx, freq_axis=None,
                       beamformer="das", use_snellius=True, use_cf=True,
                       use_tvsvd=True, use_rms_norm=True, bandpass_mode="full",
-                      use_depth_gain=True, gate_ns=0.5,
-                      shell_center=(0.0, 0.0),
+                      use_depth_gain=False, gate_ns=0.70,
+                      ref_col="adi_ref_id", shell_center="auto", restrict_to_breast=True,
                       margin_factor=DEFAULT_GRID_MARGIN_FACTOR,
                       grid_step_mm=DEFAULT_GRID_STEP_MM,
                       return_diagnostics=False):
     """
     Fully self-contained per-scan reconstruction.
+
+    ref_col: metadata column of the reference scan subtracted from the raw scan
+        ("adi_ref_id" = adipose-only scan, removes the shell reflection; "emp_ref_id" =
+        empty chamber). Falls back to emp_ref_id if the requested reference is missing.
+    shell_center: (x_mm, y_mm), or "auto" = estimated from the adipose reference echo.
+        The breast circle of the delay model is centred here.
+    restrict_to_breast: zero the image and CF map outside the breast circle, so the
+        shell reflection ring and out-of-tissue pixels cannot be selected as the tumour.
     """
     t_start = perf_counter()
     row = tumor_model.iloc[scan_idx]
@@ -68,7 +95,9 @@ def reconstruct_scan(scan_idx, s21, tumor_model, id_to_original_idx, freq_axis=N
     
         # A. BACKGROUND SUBTRACTION (CORRECT FOR UM-BMID)
     # Isolates the scattered field from the tumor by removing the background response.
-    emp_ref_id = row.get("emp_ref_id", None)
+    emp_ref_id = row.get(ref_col, None)
+    if emp_ref_id is None or pd.isna(emp_ref_id) or int(emp_ref_id) not in id_to_original_idx:
+        ref_col, emp_ref_id = "emp_ref_id", row.get("emp_ref_id", None)
     fd_scan = fd_raw.copy()
     
     if emp_ref_id is not None and not pd.isna(emp_ref_id):
@@ -92,6 +121,12 @@ def reconstruct_scan(scan_idx, s21, tumor_model, id_to_original_idx, freq_axis=N
         fd_scan = sp.apply_band_mask(fd_scan, freq_axis, low_cut=4e9, high_cut=6e9)
     elif bandpass_mode == "full":
         pass  # full 1-8 GHz (baseline, reproduktibel)
+    elif isinstance(bandpass_mode, tuple) and len(bandpass_mode) == 2:
+        # arbitrary sub-band (low_hz, high_hz), e.g. for sub-band consistency checks
+        if freq_axis is None:
+            raise ValueError("a sub-band bandpass_mode requires freq_axis.")
+        fd_scan = sp.apply_band_mask(fd_scan, freq_axis, low_cut=bandpass_mode[0],
+                                     high_cut=bandpass_mode[1])
     else:
         raise ValueError(f"Unknown bandpass_mode: {bandpass_mode!r}")
 
@@ -113,12 +148,20 @@ def reconstruct_scan(scan_idx, s21, tumor_model, id_to_original_idx, freq_axis=N
     else:
         n_removed = 0
 
-    # 4. Imaging Grid Setup
+    # 4. Imaging Grid Setup (origin-centred, widened by the shell offset)
+    if isinstance(shell_center, str) and shell_center == "auto":
+        shell_center = resolve_shell_center(row, s21, id_to_original_idx)
+    shell_center = (float(shell_center[0]), float(shell_center[1]))
     grid_x_mm, grid_y_mm, axis_mm, grid_radius_mm = build_grid(
-        breast_radius_mm, margin_factor, grid_step_mm)
-    grid_x_m = grid_x_mm.ravel() / 1000.0
-    grid_y_m = grid_y_mm.ravel() / 1000.0
+        breast_radius_mm, margin_factor, grid_step_mm,
+        extra_mm=np.ceil(max(abs(shell_center[0]), abs(shell_center[1]))))
+    # The delay model's breast circle is centred at the shell centre: shift antennas and
+    # pixels into shell-centred coordinates (delays are translation invariant).
     shell_center_m = (shell_center[0] / 1000.0, shell_center[1] / 1000.0)
+    grid_x_m = grid_x_mm.ravel() / 1000.0 - shell_center_m[0]
+    grid_y_m = grid_y_mm.ravel() / 1000.0 - shell_center_m[1]
+    geom = dict(geom, ant_x=geom["ant_x"] - shell_center_m[0], ant_y=geom["ant_y"] - shell_center_m[1],
+                ant_x_b=geom["ant_x_b"] - shell_center_m[0], ant_y_b=geom["ant_y_b"] - shell_center_m[1])
 
     # 5. Delay Grid Calculation (Snellius Bistatic Precise)
     cache_key = _delay_cache_key(
@@ -151,10 +194,12 @@ def reconstruct_scan(scan_idx, s21, tumor_model, id_to_original_idx, freq_axis=N
         
         delay_grid = delay_grid.reshape(-1, *grid_x_mm.shape)
         _DELAY_CACHE[cache_key] = delay_grid
+        if len(_DELAY_CACHE) > _DELAY_CACHE_MAX:
+            _DELAY_CACHE.popitem(last=False)
 
     # E. Depth Gain Compensation
     if use_depth_gain:
-        time_signal = sp.apply_depth_gain(time_signal, delay_grid)
+        time_signal = sp.apply_depth_gain(time_signal, delay_grid, v_tissue=v_tissue)
     
     # 6. Beamforming
     if beamformer == "das":
@@ -175,6 +220,13 @@ def reconstruct_scan(scan_idx, s21, tumor_model, id_to_original_idx, freq_axis=N
     else:
         raise ValueError(f"Unknown beamformer: {beamformer!r}")
 
+    # 6b. Keep only the breast region (shell-centred disc of the breast radius)
+    if restrict_to_breast:
+        outside = np.hypot(grid_x_mm - shell_center[0], grid_y_mm - shell_center[1]) > breast_radius_mm
+        img = np.where(outside, 0.0, img)
+        if cf_map is not None:
+            cf_map = np.where(outside, 0.0, cf_map)
+
     # 7. Blob Extraction + Localization
     blob = bd.extract_blob_candidate(img, axis_mm, axis_mm)
 
@@ -185,6 +237,7 @@ def reconstruct_scan(scan_idx, s21, tumor_model, id_to_original_idx, freq_axis=N
     computed = mx.compute_all_metrics(
         img, blob["tumor_mask"], axis_mm, axis_mm,
         blob["peak_x"], blob["peak_y"], gt_x_mm, gt_y_mm, gt_r_mm,
+        region=~outside if restrict_to_breast else None,
     )
 
     cf_at_peak = None
@@ -206,6 +259,8 @@ def reconstruct_scan(scan_idx, s21, tumor_model, id_to_original_idx, freq_axis=N
         gt_x_mm=gt_x_mm, gt_y_mm=gt_y_mm, gt_r_mm=gt_r_mm,
         blob_area_px=blob["blob_area_px"], blob_compactness=blob["blob_compactness"],
         cf_at_peak=cf_at_peak,
+        shell_cx_mm=shell_center[0], shell_cy_mm=shell_center[1], ref_col=ref_col,
+        restrict_to_breast=restrict_to_breast,
         use_rms_norm=use_rms_norm, bandpass_mode=bandpass_mode, gate_ns=gate_ns,
         runtime_sec=runtime_sec,
         **computed,

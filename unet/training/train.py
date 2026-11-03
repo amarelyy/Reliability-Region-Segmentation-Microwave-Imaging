@@ -65,9 +65,12 @@ def main():
     freq_axis = np.linspace(1e9, 8e9, 1001)
 
     # Split data (Simple 80/20 split for now)
-    n_scans = len(tumor_model)
-    train_indices = list(range(int(0.8 * n_scans)))
-    val_indices = list(range(int(0.8 * n_scans), n_scans))
+    # Split BY PHANTOM so no phantom appears in both sets (scans of one phantom are not independent)
+    from sklearn.model_selection import GroupShuffleSplit
+    gss = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+    train_indices, val_indices = next(gss.split(tumor_model, groups=tumor_model["phant_id"]))
+    np.save(Path(__file__).resolve().parent.parent / "checkpoints" / "val_phantoms.npy",
+            tumor_model["phant_id"].iloc[val_indices].unique())
 
     train_dataset = MicrowaveImagingDataset(s21, tumor_model.iloc[train_indices].reset_index(drop=True), 
                                             id_to_original_idx, freq_axis)

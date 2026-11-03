@@ -156,7 +156,7 @@ def evaluate_unet() -> pd.DataFrame:
             # Inference
             x = torch.from_numpy(input_tensor).unsqueeze(0).float().to(DEVICE)  # (1, 2, H, W)
             output = model(x)  # (1, 1, H, W)
-            pred_prob = torch.sigmoid(output).squeeze().cpu().numpy()  # (H, W)
+            pred_prob = output.squeeze().cpu().numpy()  # model already ends in Sigmoid
             pred_mask = (pred_prob > THRESHOLD).astype(np.float32)
 
             # Buat Ground Truth Mask
@@ -218,5 +218,31 @@ def evaluate_unet() -> pd.DataFrame:
     return df
 
 
+
+
+@torch.no_grad()
+def evaluate_unet_heldout() -> pd.DataFrame:
+    """Evaluate on held-out phantoms only, with EXACTLY the training preprocessing
+    (per-channel min-max, 128x128 resize, nearest-neighbour mask)."""
+    from unet.dataset.microwave_dataset import MicrowaveImagingDataset
+    model = UNet2Ch(n_channels=2, n_classes=1).to(DEVICE)
+    model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
+    model.eval()
+    data = load_all_data()
+    tm = data["tumor_model"]
+    val_phantoms = np.load(Path(MODEL_PATH).parent / "val_phantoms.npy", allow_pickle=True)
+    tm_val = tm[tm["phant_id"].isin(val_phantoms)].reset_index(drop=True)
+    ds = MicrowaveImagingDataset(data["s21"], tm_val, data["id_to_original_idx"], data["freq_axis"])
+    rows = []
+    for i in range(len(ds)):
+        x, y = ds[i]
+        prob = model(x.unsqueeze(0).to(DEVICE)).squeeze().cpu().numpy()   # already sigmoid
+        m = compute_metrics((prob > THRESHOLD).astype(np.float32), y.squeeze().numpy())
+        rows.append({"phant_id": tm_val.at[i, "phant_id"], **m})
+    df = pd.DataFrame(rows)
+    print(df[["dice", "precision", "recall"]].describe().loc[["mean", "std"]])
+    return df
+
+
 if __name__ == "__main__":
-    evaluate_unet()
+    evaluate_unet_heldout()

@@ -84,7 +84,7 @@ class MicrowaveImagingDataset(Dataset):
             idx, self.s21, self.tumor_model, self.id_to_original_idx, 
             freq_axis=self.freq_axis,
             beamformer="das", use_snellius=True, use_cf=self.use_cf,
-            use_tvsvd=False, use_bandpass=True, use_depth_gain=False,
+            use_tvsvd=False, bandpass_mode="full", use_depth_gain=False,
             return_diagnostics=True
         )
         

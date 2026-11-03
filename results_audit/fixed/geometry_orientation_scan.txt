@@ -1,0 +1,16 @@
+== fixed (pred points transformed: optional mirror y->-y, then rotate) ==
+ mirror  rot_deg  meanLE  medLE  det15
+  False    181.0   45.36  41.02   8.33
+  False    182.0   45.36  40.82   8.13
+  False    180.0   45.36  41.04   8.53
+  False    183.0   45.36  40.52   8.13
+  False    179.0   45.36  40.88   8.53
+identity: False 0.0 49.89 45.48 5.36
+== baseline (pred points transformed: optional mirror y->-y, then rotate) ==
+ mirror  rot_deg  meanLE  medLE  det15
+  False     33.0   31.46  31.08  13.49
+  False     34.0   31.46  30.95  13.69
+  False     32.0   31.46  31.07  13.49
+  False     35.0   31.46  30.76  13.49
+  False     31.0   31.46  31.13  13.69
+identity: False 0.0 31.84 31.53 12.3

@@ -1,0 +1,315 @@
+diff --git a/ablation_runner.py b/ablation_runner.py
+index 9b42d90..e865948 100644
+--- a/ablation_runner.py
++++ b/ablation_runner.py
+@@ -44,7 +44,7 @@ def _run_one(idx, variant, s21, tumor_model, id_to_original_idx):
+             beamformer=variant["beamformer"],
+             use_snellius=variant["use_snellius"],
+             use_cf=variant["use_cf"],
+-            use_bandpass=variant.get("use_bandpass", False),
++            bandpass_mode="4-6ghz" if variant.get("use_bandpass", False) else "full",
+             use_depth_gain=variant.get("use_depth_gain", False),
+         )
+         r.pop("diagnostics", None)
+diff --git a/rrs_mbi/evaluator.py b/rrs_mbi/evaluator.py
+index cc461f2..5b4b1f2 100644
+--- a/rrs_mbi/evaluator.py
++++ b/rrs_mbi/evaluator.py
+@@ -23,12 +23,13 @@ def compute_localization_error(pred: Tuple[float, float], true: Tuple[float, flo
+     return float(np.sqrt((pred[0] - true[0])**2 + (pred[1] - true[1])**2))
+ 
+ 
+-def bootstrap_ci(errors: np.ndarray, n_boot: int = 1000, conf: float = 0.95) -> Tuple[float, float]:
++def bootstrap_ci(errors: np.ndarray, n_boot: int = 1000, conf: float = 0.95, seed: int = 42) -> Tuple[float, float]:
+     if len(errors) == 0:
+         return 0.0, 0.0
++    rng = np.random.default_rng(seed)
+     e = np.asarray(errors, dtype=np.float64).ravel()
+     means = [
+-        float(np.mean(np.random.choice(e, size=len(e), replace=True)))
++        float(np.mean(rng.choice(e, size=len(e), replace=True)))
+         for _ in range(n_boot)
+     ]
+     alpha = 1.0 - conf
+@@ -114,7 +115,7 @@ def run_evaluation() -> pd.DataFrame:
+             img = res["diagnostics"]["image"]
+             axis_mm = res["diagnostics"]["axis_mm"]
+             cf_val = res.get("cf_at_peak", None)
+-            rel_metrics = evaluate_scan_reliability(img, axis_mm=axis_mm, cf_at_peak=cf_val, saturation_radius_mm=5.0)
++            rel_metrics = evaluate_scan_reliability(img, axis_mm=axis_mm, cf_at_peak=cf_val, saturation_radius_mm=20.0)
+ 
+             # Ground Truth
+             gt_x = float(res.get("gt_x_mm", np.nan))
+diff --git a/src/beamforming.py b/src/beamforming.py
+index 7da7129..529e76b 100644
+--- a/src/beamforming.py
++++ b/src/beamforming.py
+@@ -13,7 +13,7 @@ from scipy.interpolate import interp1d
+ from scipy.signal.windows import tukey
+ 
+ ANTENNA_WINDOW_ALPHA = 0.2
+-GATE_NS = 0.5   # zero out samples before this — pre-tissue direct antenna
++GATE_NS = 0.70  # zero out samples before this — pre-tissue direct antenna
+                  # coupling/crosstalk can't physically be a tissue reflection
+ 
+ 
+diff --git a/src/physics.py b/src/physics.py
+index f40f8f4..e79276a 100644
+--- a/src/physics.py
++++ b/src/physics.py
+@@ -6,6 +6,7 @@ V_AIR = C_LIGHT / np.sqrt(EPSILON_AIR)   # ~299.9 mm/ns
+ 
+ N_ANT = 72
+ SEPARATION_DEG = 60.0
++PORT_A_START_DEG = -130.0   # UM-BMID Gen-2 (docs/scan_geometry.md)
+ 
+ def compute_effective_velocity(fat_frac, fib_frac, eps_fat=7.0, eps_fib=45.0):
+     """Hitung kecepatan efektif berdasarkan komposisi phantom."""
+@@ -15,11 +16,12 @@ def compute_effective_velocity(fat_frac, fib_frac, eps_fat=7.0, eps_fib=45.0):
+ 
+ def get_corrected_ant_radius_m(raw_rad_mm):
+     """Rodriguez-Herrera (2016) antenna radius correction. Input mm, output metres."""
+-    return (0.97 * (raw_rad_mm - 0.106) + 0.148) / 1000.0
++    raw_rad_m = raw_rad_mm / 1000.0          # UM-BMID formula is in metres
++    return 0.97 * (raw_rad_m - 0.106) + 0.148
+ 
+ def get_antenna_geometry(ant_rad_mm, n_ant=N_ANT, separation_deg=SEPARATION_DEG, apply_correction=True):
+     ant_rad_m = get_corrected_ant_radius_m(ant_rad_mm) if apply_correction else ant_rad_mm / 1000.0
+-    angles = np.linspace(0, -2 * np.pi, n_ant, endpoint=False)
++    angles = np.deg2rad(PORT_A_START_DEG) + np.linspace(0, -2 * np.pi, n_ant, endpoint=False)
+     ant_x = ant_rad_m * np.cos(angles)
+     ant_y = ant_rad_m * np.sin(angles)
+     offset = np.deg2rad(separation_deg)
+@@ -31,90 +33,35 @@ def get_antenna_geometry(ant_rad_mm, n_ant=N_ANT, separation_deg=SEPARATION_DEG,
+     return dict(ant_x=ant_x, ant_y=ant_y, ant_x_b=ant_x_b, ant_y_b=ant_y_b,
+                 tx_idx=tx_idx, rx_idx=rx_idx, ant_rad_m=ant_rad_m)
+ 
+-def snellius_bistatic_delay_precise(ant_x, ant_y, ant_x_b, ant_y_b, grid_x_m, grid_y_m, 
++def _tissue_length(a, b, R):
++    """Length of segment a->b (arrays (N,2)) that lies inside the circle of radius R."""
++    d = b - a
++    A = np.sum(d**2, axis=1)
++    B = 2 * np.sum(a * d, axis=1)
++    C = np.sum(a**2, axis=1) - R**2
++    disc = B**2 - 4 * A * C
++    s = np.sqrt(np.maximum(disc, 0.0))
++    t1 = np.clip((-B - s) / (2 * A), 0.0, 1.0)
++    t2 = np.clip((-B + s) / (2 * A), 0.0, 1.0)
++    return np.where(disc > 0, (t2 - t1) * np.sqrt(A), 0.0)
++
++
++def snellius_bistatic_delay_precise(ant_x, ant_y, ant_x_b, ant_y_b, grid_x_m, grid_y_m,
+                                     breast_radius_m, v_tissue, v_air=C_LIGHT):
+     """
+-    Menghitung delay bistatic (Tx->Grid->Rx) dengan koreksi Snellius presisi.
+-    Menggunakan line-circle intersection analitik untuk menentukan panjang jalur di Udara vs Tissue.
++    Bistatic Tx -> pixel -> Rx delay with a straight-ray two-medium (air/tissue) split.
++    Each leg's tissue length is the clipped chord of the segment through the breast circle,
++    so it is correct for pixels inside AND outside the breast.
+     """
+-    n_ant = len(ant_x)
++    grid_pos = np.stack([grid_x_m, grid_y_m], axis=1)
+     n_pix = len(grid_x_m)
+-    delay_grid = np.zeros((n_ant, n_pix))
+-    
+-    tx_pos = np.stack([ant_x, ant_y], axis=1) # (72, 2)
+-    rx_pos = np.stack([ant_x_b, ant_y_b], axis=1) # (72, 2)
+-    grid_pos = np.stack([grid_x_m, grid_y_m], axis=1) # (N_pix, 2)
+-    
+-    R = breast_radius_m
+-    
+-    for i in range(n_ant):
+-        tx = tx_pos[i]
+-        rx = rx_pos[i]
+-        
+-        # --- LEG 1: Tx -> Grid Point ---
+-        vec_tx = grid_pos - tx # (N_pix, 2)
+-        dist_tx_total = np.linalg.norm(vec_tx, axis=1)
+-        
+-        # Line-Circle Intersection for Tx leg
+-        a1 = np.sum(vec_tx**2, axis=1)
+-        b1 = 2 * np.sum(tx * vec_tx, axis=1)
+-        c1 = np.sum(tx**2) - R**2
+-        disc1 = b1**2 - 4*a1*c1
+-        
+-        # FIX: Initialize as ARRAYS, not floats
+-        dist_air_tx = dist_tx_total.copy()
+-        dist_tissue_tx = np.zeros_like(dist_tx_total)
+-        
+-        valid1 = disc1 >= 0
+-        if np.any(valid1):
+-            sqrt_disc1 = np.sqrt(np.maximum(disc1[valid1], 0))
+-            t1 = (-b1[valid1] - sqrt_disc1) / (2*a1[valid1])
+-            t2 = (-b1[valid1] + sqrt_disc1) / (2*a1[valid1])
+-            
+-            # Entry is the first intersection
+-            t_entry = np.where(t1 > 1e-6, t1, t2)
+-            
+-            is_inside = t_entry < 1.0
+-            idx_inside = np.where(valid1)[0][is_inside]
+-            
+-            if len(idx_inside) > 0:
+-                t_val = t_entry[is_inside]
+-                dist_air_tx[idx_inside] = t_val * dist_tx_total[idx_inside]
+-                dist_tissue_tx[idx_inside] = (1 - t_val) * dist_tx_total[idx_inside]
+-                
+-        # --- LEG 2: Grid Point -> Rx ---
+-        vec_rx = rx - grid_pos # (N_pix, 2)
+-        dist_rx_total = np.linalg.norm(vec_rx, axis=1)
+-        
+-        a2 = np.sum(vec_rx**2, axis=1)
+-        b2 = 2 * np.sum(grid_pos * vec_rx, axis=1)
+-        c2 = np.sum(grid_pos**2) - R**2
+-        disc2 = b2**2 - 4*a2*c2
+-        
+-        # FIX: Initialize as ARRAYS, not floats
+-        dist_air_rx = dist_rx_total.copy()
+-        dist_tissue_rx = np.zeros_like(dist_rx_total)
+-        
+-        valid2 = disc2 >= 0
+-        if np.any(valid2):
+-            sqrt_disc2 = np.sqrt(np.maximum(disc2[valid2], 0))
+-            t1_2 = (-b2[valid2] - sqrt_disc2) / (2*a2[valid2])
+-            t2_2 = (-b2[valid2] + sqrt_disc2) / (2*a2[valid2])
+-            
+-            # Exit point is the first intersection from grid towards rx
+-            t_exit = np.where(t1_2 > 1e-6, t1_2, t2_2)
+-            
+-            is_inside_2 = t_exit < 1.0
+-            idx_inside_2 = np.where(valid2)[0][is_inside_2]
+-            
+-            if len(idx_inside_2) > 0:
+-                t_val_2 = t_exit[is_inside_2]
+-                dist_tissue_rx[idx_inside_2] = t_val_2 * dist_rx_total[idx_inside_2]
+-                dist_air_rx[idx_inside_2] = (1 - t_val_2) * dist_rx_total[idx_inside_2]
+-
+-        # --- TOTAL DELAY ---
+-        # Time = (Dist_Air / V_AIR) + (Dist_Tissue / V_TISSUE)
+-        delay_grid[i] = (dist_air_tx + dist_air_rx) / v_air + \
+-                        (dist_tissue_tx + dist_tissue_rx) / v_tissue
+-
+-    return delay_grid
+\ No newline at end of file
++    delay_grid = np.zeros((len(ant_x), n_pix))
++    for i in range(len(ant_x)):
++        tx = np.broadcast_to([ant_x[i], ant_y[i]], (n_pix, 2))
++        rx = np.broadcast_to([ant_x_b[i], ant_y_b[i]], (n_pix, 2))
++        L_tx = np.linalg.norm(grid_pos - tx, axis=1)
++        L_rx = np.linalg.norm(rx - grid_pos, axis=1)
++        t_tx = _tissue_length(tx, grid_pos, breast_radius_m)
++        t_rx = _tissue_length(grid_pos, rx, breast_radius_m)
++        delay_grid[i] = (L_tx - t_tx + L_rx - t_rx) / v_air + (t_tx + t_rx) / v_tissue
++    return delay_grid
+diff --git a/src/pipeline.py b/src/pipeline.py
+index ad6d37a..c27e96f 100644
+--- a/src/pipeline.py
++++ b/src/pipeline.py
+@@ -19,7 +19,9 @@ from typing import Dict, Any
+ DEFAULT_GRID_MARGIN_FACTOR = 1.5
+ DEFAULT_GRID_STEP_MM = 1.0
+ 
+-_DELAY_CACHE = {}
++from collections import OrderedDict
++_DELAY_CACHE = OrderedDict()
++_DELAY_CACHE_MAX = 8   # ~17 MB per phantom grid; keep memory bounded
+ 
+ def _delay_cache_key(phant_id, use_snellius, ant_rad_mm, breast_radius_mm,
+                       v_tissue, margin_factor, grid_step_mm, shell_center):
+@@ -38,7 +40,7 @@ def build_grid(breast_radius_mm, margin_factor=DEFAULT_GRID_MARGIN_FACTOR,
+ def reconstruct_scan(scan_idx, s21, tumor_model, id_to_original_idx, freq_axis=None,
+                       beamformer="das", use_snellius=True, use_cf=True,
+                       use_tvsvd=True, use_rms_norm=True, bandpass_mode="full",
+-                      use_depth_gain=True, gate_ns=0.5,
++                      use_depth_gain=False, gate_ns=0.70,
+                       shell_center=(0.0, 0.0),
+                       margin_factor=DEFAULT_GRID_MARGIN_FACTOR,
+                       grid_step_mm=DEFAULT_GRID_STEP_MM,
+@@ -151,6 +153,8 @@ def reconstruct_scan(scan_idx, s21, tumor_model, id_to_original_idx, freq_axis=N
+         
+         delay_grid = delay_grid.reshape(-1, *grid_x_mm.shape)
+         _DELAY_CACHE[cache_key] = delay_grid
++        if len(_DELAY_CACHE) > _DELAY_CACHE_MAX:
++            _DELAY_CACHE.popitem(last=False)
+ 
+     # E. Depth Gain Compensation
+     if use_depth_gain:
+diff --git a/unet/dataset/microwave_dataset.py b/unet/dataset/microwave_dataset.py
+index 0dff4df..424d0ba 100644
+--- a/unet/dataset/microwave_dataset.py
++++ b/unet/dataset/microwave_dataset.py
+@@ -84,7 +84,7 @@ class MicrowaveImagingDataset(Dataset):
+             idx, self.s21, self.tumor_model, self.id_to_original_idx, 
+             freq_axis=self.freq_axis,
+             beamformer="das", use_snellius=True, use_cf=self.use_cf,
+-            use_tvsvd=False, use_bandpass=True, use_depth_gain=False,
++            use_tvsvd=False, bandpass_mode="full", use_depth_gain=False,
+             return_diagnostics=True
+         )
+         
+diff --git a/unet/evaluate_unet.py b/unet/evaluate_unet.py
+index 528963c..2b24f5c 100644
+--- a/unet/evaluate_unet.py
++++ b/unet/evaluate_unet.py
+@@ -156,7 +156,7 @@ def evaluate_unet() -> pd.DataFrame:
+             # Inference
+             x = torch.from_numpy(input_tensor).unsqueeze(0).float().to(DEVICE)  # (1, 2, H, W)
+             output = model(x)  # (1, 1, H, W)
+-            pred_prob = torch.sigmoid(output).squeeze().cpu().numpy()  # (H, W)
++            pred_prob = output.squeeze().cpu().numpy()  # model already ends in Sigmoid
+             pred_mask = (pred_prob > THRESHOLD).astype(np.float32)
+ 
+             # Buat Ground Truth Mask
+@@ -218,5 +218,31 @@ def evaluate_unet() -> pd.DataFrame:
+     return df
+ 
+ 
++
++
++@torch.no_grad()
++def evaluate_unet_heldout() -> pd.DataFrame:
++    """Evaluate on held-out phantoms only, with EXACTLY the training preprocessing
++    (per-channel min-max, 128x128 resize, nearest-neighbour mask)."""
++    from unet.dataset.microwave_dataset import MicrowaveImagingDataset
++    model = UNet2Ch(n_channels=2, n_classes=1).to(DEVICE)
++    model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
++    model.eval()
++    data = load_all_data()
++    tm = data["tumor_model"]
++    val_phantoms = np.load(Path(MODEL_PATH).parent / "val_phantoms.npy", allow_pickle=True)
++    tm_val = tm[tm["phant_id"].isin(val_phantoms)].reset_index(drop=True)
++    ds = MicrowaveImagingDataset(data["s21"], tm_val, data["id_to_original_idx"], data["freq_axis"])
++    rows = []
++    for i in range(len(ds)):
++        x, y = ds[i]
++        prob = model(x.unsqueeze(0).to(DEVICE)).squeeze().cpu().numpy()   # already sigmoid
++        m = compute_metrics((prob > THRESHOLD).astype(np.float32), y.squeeze().numpy())
++        rows.append({"phant_id": tm_val.at[i, "phant_id"], **m})
++    df = pd.DataFrame(rows)
++    print(df[["dice", "precision", "recall"]].describe().loc[["mean", "std"]])
++    return df
++
++
+ if __name__ == "__main__":
+-    evaluate_unet()
+\ No newline at end of file
++    evaluate_unet_heldout()
+diff --git a/unet/training/train.py b/unet/training/train.py
+index e088eeb..02117f5 100644
+--- a/unet/training/train.py
++++ b/unet/training/train.py
+@@ -65,9 +65,12 @@ def main():
+     freq_axis = np.linspace(1e9, 8e9, 1001)
+ 
+     # Split data (Simple 80/20 split for now)
+-    n_scans = len(tumor_model)
+-    train_indices = list(range(int(0.8 * n_scans)))
+-    val_indices = list(range(int(0.8 * n_scans), n_scans))
++    # Split BY PHANTOM so no phantom appears in both sets (scans of one phantom are not independent)
++    from sklearn.model_selection import GroupShuffleSplit
++    gss = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
++    train_indices, val_indices = next(gss.split(tumor_model, groups=tumor_model["phant_id"]))
++    np.save(Path(__file__).resolve().parent.parent / "checkpoints" / "val_phantoms.npy",
++            tumor_model["phant_id"].iloc[val_indices].unique())
+ 
+     train_dataset = MicrowaveImagingDataset(s21, tumor_model.iloc[train_indices].reset_index(drop=True), 
+                                             id_to_original_idx, freq_axis)

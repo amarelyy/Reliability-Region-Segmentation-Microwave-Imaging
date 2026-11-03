@@ -1,0 +1,15 @@
+scans with usable fib_ref_id: 1/504
+Traceback (most recent call last):
+  File "<stdin>", line 16, in <module>
+  File "D:\Reliability-Region-Segmentation-Microwave-Imaging\venv_ai\Lib\site-packages\pandas\util\_decorators.py", line 336, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "D:\Reliability-Region-Segmentation-Microwave-Imaging\venv_ai\Lib\site-packages\pandas\core\frame.py", line 10835, in groupby
+    return DataFrameGroupBy(
+           ^^^^^^^^^^^^^^^^^
+  File "D:\Reliability-Region-Segmentation-Microwave-Imaging\venv_ai\Lib\site-packages\pandas\core\groupby\groupby.py", line 1095, in __init__
+    grouper, exclusions, obj = get_grouper(
+                               ^^^^^^^^^^^^
+  File "D:\Reliability-Region-Segmentation-Microwave-Imaging\venv_ai\Lib\site-packages\pandas\core\groupby\grouper.py", line 901, in get_grouper
+    raise KeyError(gpr)
+KeyError: 'ref'

@@ -49,23 +49,18 @@ def create_tight_square_risk_matrix():
     # TRUE 1:1 CANVAS
     # ========================================================
     fig = plt.figure(
-        figsize=(7, 7),
+        figsize=(6.5, 6.5),
         facecolor='white'
     )
 
     # ========================================================
-    # LARGER + MORE CENTERED MATRIX
+    # TIGHTER MATRIX LAYOUT
     # ========================================================
-    #
-    # Increased matrix size substantially.
-    # The matrix now occupies more of the canvas,
-    # reducing unnecessary white space.
-    #
     ax = fig.add_axes([
-        0.27,   # left
-        0.25,   # bottom
-        0.48,   # width
-        0.48    # height
+        0.15,   # left
+        0.12,   # bottom
+        0.72,   # width
+        0.72    # height
     ])
 
     # ========================================================
@@ -80,109 +75,78 @@ def create_tight_square_risk_matrix():
     )
 
     # ========================================================
-    # CELL TEXT
+    # CELL TEXT (Tanpa markdown, 2 baris: status + parameter)
     # ========================================================
-    conditions = [
-        ["Mod CC\nSafe G", "High CC\nSafe G",
-         "Crit CC\nCrit G", "Crit CC\nCrit G"],
+    # Baris 1: Status (akan di-render bold terpisah)
+    status_text = [
+        ["Mod CC, Safe G", "High CC, Safe G", "Crit CC, Crit G", "Crit CC, Crit G"],
+        ["Mod CC, Safe G", "Mod CC, Safe G", "High CC, Mod G", "High CC, Mod G"],
+        ["Low CC, Safe G", "Mod CC, Safe G", "Mod CC, Mod G", "Mod CC, Mod G"],
+        ["Low CC, Safe G", "Low CC, Safe G", "Low CC, Safe G", "Low CC, Safe G"]
+    ]
 
-        ["Mod CC\nSafe G", "Mod CC\nSafe G",
-         "High CC\nMod G", "High CC\nMod G"],
-
-        ["Low CC\nSafe G", "Mod CC\nSafe G",
-         "Mod CC\nMod G", "Mod CC\nMod G"],
-
-        ["Low CC\nSafe G", "Low CC\nSafe G",
-         "Low CC\nSafe G", "Low CC\nSafe G"]
+    # Baris 2: Parameter (italic)
+    param_text = [
+        ["(D<0.4, CC<0.3, G>0.8)", "(D<0.4, CC<0.6, G>0.5)", "(D<0.4, CC>0.6, G<0.5)", "(D<0.4, CC>0.6, G<0.25)"],
+        ["(D<0.7, CC<0.3, G>0.8)", "(D<0.7, CC<0.6, G>0.5)", "(D<0.7, CC>0.6, G<0.5)", "(D<0.7, CC>0.6, G<0.25)"],
+        ["(D>0.7, CC<0.3, G>0.8)", "(D>0.7, CC<0.6, G>0.5)", "(D>0.7, CC>0.6, G<0.5)", "(D>0.7, CC>0.6, G<0.25)"],
+        ["(D>0.9, CC<0.3, G>0.8)", "(D>0.9, CC<0.6, G>0.5)", "(D>0.9, CC>0.6, G<0.5)", "(D>0.9, CC>0.6, G<0.25)"]
     ]
 
     for i in range(4):
         for j in range(4):
-
             txt_color = 'white' if risk_data[i, j] >= 2 else 'black'
 
+            # Baris 1: Status (Bold) - sedikit di atas center
             ax.text(
                 j + 0.5,
-                i + 0.5,
-                conditions[i][j],
+                i + 0.58,
+                status_text[i][j],
                 ha='center',
                 va='center',
-                fontsize=6.5,
+                fontsize=5.2,
                 fontweight='bold',
-                color=txt_color,
-                linespacing=0.9
+                color=txt_color
+            )
+
+            # Baris 2: Parameter (Italic) - sedikit di bawah center
+            ax.text(
+                j + 0.5,
+                i + 0.42,
+                param_text[i][j],
+                ha='center',
+                va='center',
+                fontsize=4.5,
+                fontstyle='italic',
+                color=txt_color
             )
 
     # ========================================================
     # X-AXIS LABELS
     # ========================================================
-    x_labels = [
-        'Low\n(CC<0.3, G>0.8)',
-        'Med-Low\n(CC<0.6, G>0.5)',
-        'Med-High\n(CC>0.6, G<0.5)',
-        'High\n(CC>0.6, G<0.25)'
-    ]
-
+    x_labels = ['Low', 'Med-Low', 'Med-High', 'High']
     ax.set_xticks(np.arange(4) + 0.5)
-
-    ax.set_xticklabels(
-        x_labels,
-        fontsize=6,
-        rotation=30,
-        ha='right',
-        va='top'
-    )
-
-    ax.tick_params(
-        axis='x',
-        pad=2,
-        length=3
-    )
+    ax.set_xticklabels(x_labels, fontsize=7, rotation=0, ha='center', va='top')
+    ax.tick_params(axis='x', pad=4, length=3)
 
     # ========================================================
     # Y-AXIS LABELS
     # ========================================================
-    y_labels = [
-        'High\n(D<0.4)',
-        'Med-High\n(D<0.7)',
-        'Med-Low\n(D>0.7)',
-        'Low\n(D>0.9)'
-    ]
-
+    y_labels = ['High', 'Med-High', 'Med-Low', 'Low']
     ax.set_yticks(np.arange(4) + 0.5)
-
-    ax.set_yticklabels(
-        y_labels,
-        fontsize=6,
-        va='center'
-    )
-
-    ax.tick_params(
-        axis='y',
-        pad=3,
-        length=3
-    )
+    ax.set_yticklabels(y_labels, fontsize=7, va='center')
+    ax.tick_params(axis='y', pad=4, length=3)
 
     # ========================================================
     # AXIS TITLES
     # ========================================================
-    ax.set_xlabel(
-        'Likelihood of geometric artifact (CC & G)',
-        fontsize=7.5,
-        labelpad=7
-    )
-
-    ax.set_ylabel(
-        'Impact on detection accuracy ($D_{norm}$)',
-        fontsize=7.5,
-        labelpad=8
-    )
+    ax.set_xlabel('Likelihood of geometric artifact (CC & G)', fontsize=8, labelpad=6)
+    ax.set_ylabel('Impact on detection accuracy ($D_{norm}$)', fontsize=8, labelpad=6)
 
     # ========================================================
     # PERFECTLY SQUARE MATRIX
     # ========================================================
     ax.set_aspect('equal', adjustable='box')
-
     ax.set_xlim(0, 4)
     ax.set_ylim(0, 4)
 
@@ -191,40 +155,27 @@ def create_tight_square_risk_matrix():
     # ========================================================
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
-
     ax.spines['left'].set_linewidth(0.8)
     ax.spines['bottom'].set_linewidth(0.8)
 
     # ========================================================
-    # TITLE — CLOSER TO MATRIX
+    # TITLE (Diturunkan posisinya agar lebih jauh dari matriks)
     # ========================================================
-    fig.text(
-        0.50,
-        0.88,
+    fig.suptitle(
         'RRS-MBI Clinical Safety Risk Matrix',
-        ha='center',
-        va='center',
-        fontsize=10,
-        fontweight='bold'
+        fontsize=12,
+        fontweight='bold',
+        y=0.88   # Diturunkan dari 0.96 ke 0.88 → jarak lebih jauh dari matriks
     )
 
     # ========================================================
     # SAVE
     # ========================================================
     out_path = OUTPUT_DIR / "rrs_clinical_risk_matrix.png"
-
-    plt.savefig(
-        out_path,
-        dpi=600,
-        facecolor='white',
-        edgecolor='none'
-    )
-
+    plt.savefig(out_path, dpi=600, facecolor='white', edgecolor='none', bbox_inches='tight')
     plt.close(fig)
 
     print(f"[Saved] {out_path}")
-    print("Output: 4200 × 4200 pixels")
-    print("Aspect ratio: 1:1")
 
 
 if __name__ == "__main__":

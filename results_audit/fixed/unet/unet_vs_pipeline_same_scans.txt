@@ -1,0 +1,9 @@
+held-out phantoms: ['A11F1', 'A11F4', 'A12F2', 'A13F11', 'A13F12', 'A13F3', 'A15F14', 'A15F4', 'A16F3', 'A1F11', 'A2F3', 'A3F2', 'A3F3', 'A3F5']
+n scans 103
+U-Net mask-centroid LE: mean 37.1 median 32.6 det15 19.4%
+baseline      blob       : mean 33.3 median 34.4 det15 9.7%  (n=103)
+baseline      argmax_inR : mean 31.6 median 32.6 det15 13.6%  (n=103)
+fixed         blob       : mean 54.3 median 50.6 det15 4.9%  (n=103)
+fixed         argmax_inR : mean 32.0 median 32.3 det15 11.7%  (n=103)
+fixed_adisub  blob       : mean 38.6 median 35.7 det15 6.8%  (n=103)
+fixed_adisub  argmax_inR : mean 33.3 median 33.9 det15 10.7%  (n=103)

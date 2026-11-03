@@ -166,10 +166,14 @@ def apply_band_mask(fd_signal, freq_axis, low_cut=4e9, high_cut=6e9, taper_hz=0.
     mask = np.sin(np.minimum(up, dn) * np.pi / 2) ** 2
     return fd_signal * mask[:, None]
 
-def apply_depth_gain(time_signal, delay_grid, alpha_db_per_cm=0.7):
+def apply_depth_gain(time_signal, delay_grid, v_tissue, alpha_db_per_cm=0.7):
     """
     Kompensasi attenuasi berdasarkan jarak tempuh sinyal.
     Handles both 2D and 3D delay grids safely.
+
+    One gain per antenna from the median round-trip path (delay [s] * v_tissue [m/s]).
+    NOTE: in a circular array the median path is almost the same for every antenna, so
+    this per-antenna gain is close to a constant and cannot change a normalised image.
     """
     # Flatten delay grid if needed
     if delay_grid.ndim > 2:
@@ -178,10 +182,10 @@ def apply_depth_gain(time_signal, delay_grid, alpha_db_per_cm=0.7):
     else:
         delay_flat = delay_grid
 
-    avg_distance_m = np.median(delay_flat, axis=1) 
-    
-    alpha_np = alpha_db_per_cm / 100 
-    gain_linear = 10 ** (alpha_np * avg_distance_m / 20)
+    avg_distance_m = np.median(delay_flat, axis=1) * v_tissue   # seconds -> metres
+
+    alpha_db_per_m = alpha_db_per_cm * 100
+    gain_linear = 10 ** (alpha_db_per_m * avg_distance_m / 20)
     
     # Broadcast to (n_time, n_ant)
     return time_signal * gain_linear[np.newaxis, :]

@@ -12,8 +12,10 @@ import numpy as np
 from scipy.interpolate import interp1d
 from scipy.signal.windows import tukey
 
-ANTENNA_WINDOW_ALPHA = 0.2
-GATE_NS = 0.5   # zero out samples before this — pre-tissue direct antenna
+ANTENNA_WINDOW_ALPHA = 0.0  # was 0.2: a Tukey taper over the antenna INDEX down-weights the
+                            # first/last ~7 positions, i.e. a ~70 deg sector around the start
+                            # angle. A closed circular array has no aperture edge -> uniform.
+GATE_NS = 0.70  # zero out samples before this — pre-tissue direct antenna
                  # coupling/crosstalk can't physically be a tissue reflection
 
 

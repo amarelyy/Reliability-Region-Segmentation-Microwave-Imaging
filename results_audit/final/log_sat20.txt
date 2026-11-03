@@ -1,0 +1,133 @@
+======================================================================
+RRS-MBI COMPLETE EVALUATION PIPELINE
+======================================================================
+Loading data...
+[data_loading] 285 rows missing phantom_database.csv match — attempting fallback-table backfill...
+[data_loading] backfill recovered 144 rows; 141 still unmatched.
+[data_loading] tumor columns detected in cm -> converting to mm
+[data_loading] s21 scans: 1301  |  tumor_model rows: 504  |  usable range: 0..503
+[data_loading] Reconstructed freq_axis: 1001 points from 1-8 GHz
+
+GT Diagnostic:
+   Total tumor_model rows: 504
+   Valid GT columns found: ['tumor_x_mm', 'tumor_y_mm', 'tumor_radius_mm']
+   Rows with valid GT: 504
+   Rows without GT (NaN): 0
+   Sample gt_x_mm=0.0, gt_y_mm=-7.5, gt_r_mm=15.0
+
+Evaluating 504 scans...
+  Processing 1/504...
+  Processing 51/504...
+  Processing 101/504...
+  Processing 151/504...
+  Processing 201/504...
+  Processing 251/504...
+  Processing 301/504...
+  Processing 351/504...
+  Processing 401/504...
+  Processing 451/504...
+  Processing 501/504...
+
+Skipped 0 scans (no GT or error). Evaluated: 504
+
+======================================================================
+STRATIFIED COHORT ANALYSIS (per phantom)
+======================================================================
+
+Phantoms evaluated: 66
+Scans per phantom: min=2, max=19, mean=7.6
+
+--- Per-Phantom Localization ---
+  Mean of phantom mean errors:   32.99 mm
+  Median of phantom mean errors: 33.93 mm
+  Std across phantoms:           8.83 mm
+
+--- Per-Phantom Detection Rate ---
+  Mean det rate across phantoms: 12.3%
+  Phantoms with det rate > 0%:   30/66
+
+--- Per-Phantom Reliability ---
+  Mean reliability across phantoms: 0.1377
+
+Phantom-level stats saved to rrs_mbi\results\phantom_level_stats.csv
+
+--- Phantom-Level Correlation ---
+  Spearman rho: +0.259 (p=0.0354), N=66
+  Pearson r:    +0.304 (p=0.0130)
+
+======================================================================
+COMPLETE SUMMARY
+======================================================================
+Scans evaluated: 504
+
+--- Localization ---
+  Mean Error:       30.87 mm
+  Std Error:        14.63 mm
+  Detection Rate (<=15mm): 16.7% (84/504)
+
+--- Size Estimation ---
+  Mean Size Error:  4.32 mm
+  Size Detection (<=5mm): 67.5% (340/504)
+
+--- Signal Quality ---
+  Mean SCR (dB):    10.45
+  Mean CNR:         7.03
+  Mean CF at Peak:  0.3869
+
+--- Reliability ---
+  Mean Score:       0.1261
+  Mean Dominance:   10.80
+  Mean CC:          0.3643
+  Mean G:           0.5117
+
+--- Trivial reference (always predict the shell centre) ---
+  Mean trivial error:   29.22 mm (pipeline 30.87 mm)
+  Trivial detection (<=15mm): 12.5%
+  Scans where pipeline beats trivial: 44.6%
+
+--- Threshold Analysis ---
+Kept     | Thresh     | MeanErr    | Std      | DetRate  | 95% CI
+---------------------------------------------------------------------------
+504.0    | 0.0000     | 30.87      | 14.62    | 16.7   % | [28.24-33.28]
+453.0    | 0.0060     | 31.56      | 14.65    | 15.9   % | [28.88-34.10]
+403.0    | 0.0142     | 32.03      | 14.82    | 15.9   % | [29.42-34.73]
+352.0    | 0.0258     | 32.04      | 14.81    | 16.2   % | [29.44-35.00]
+302.0    | 0.0454     | 32.19      | 14.48    | 15.9   % | [29.47-35.26]
+252.0    | 0.0702     | 32.85      | 14.27    | 13.1   % | [29.76-36.13]
+201.0    | 0.1125     | 33.63      | 13.72    | 10.0   % | [30.48-36.90]
+151.0    | 0.1704     | 33.97      | 14.27    | 9.9    % | [30.12-37.87]
+100.0    | 0.2471     | 34.86      | 14.81    | 12.0   % | [29.86-39.76]
+50.0     | 0.3273     | 33.24      | 15.52    | 18.0   % | [26.31-40.36]
+
+--- Permutation Test (top-50 vs random) ---
+  Observed mean error (top-50): 33.24 mm
+  Full dataset mean error:           30.87 mm
+  Difference:                        -2.37 mm
+  Permutation p-value (10000 iters):   0.8854
+  ❌ Not significant
+
+--- Confusion Matrix (adaptive thresholds: high>=0.1540, low<0.0300) ---
+  TP (accurate + high rel):        18
+  Fortuitous (accurate + low rel): 31
+  TN (inaccurate + low rel):       135
+  FP (inaccurate + high rel):      148
+  Unclassified (medium rel):       172
+  Chi-square (3 tiers x accurate): chi2=6.21, dof=2, p=0.0447, min expected=27.7  [assumes independent scans]
+
+--- Cluster-robust inference (phantom bootstrap, 2000x) ---
+  spearman_R_vs_LE               +0.192  95% CI [+0.075, +0.313]  one-sided p~0.9985
+  gap_top10pct_mm                -2.368  95% CI [-8.051, +3.046]  one-sided p~0.8305
+  gap_top20pct_mm                -3.992  95% CI [-7.374, -0.530]  one-sided p~0.9845
+  gap_top50scans_mm              -2.368  95% CI [-7.963, +3.309]  one-sided p~0.8195
+  det_high_minus_low_tier        -0.078  95% CI [-0.176, +0.005]  one-sided p~0.9730
+  top10pct_LE_minus_trivial_mm   +2.969  95% CI [-2.798, +8.030]  one-sided p~0.8620
+
+--- Confusion Matrix (fixed bands 0.30/0.70; descriptive only) ---
+  TP (accurate + high rel):        0
+  Fortuitous (accurate + low rel): 74
+  TN (inaccurate + low rel):       363
+  FP (inaccurate + high rel):      0
+======================================================================
+Plot saved to rrs_mbi/results/selective_curve.png
+
+Pipeline completed!

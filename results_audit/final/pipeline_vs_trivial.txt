@@ -1,0 +1,2 @@
+mean LE pipeline - trivial (mm)      +1.66  95% CI [+0.17, +3.06]
+det15 pipeline - trivial (pct-pts)   +4.17  95% CI [-0.39, +8.74]

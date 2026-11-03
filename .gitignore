@@ -19,3 +19,5 @@ venv/
 # OS files
 .DS_Store
 Thumbs.db
+# claude.ai chat export (private)
+*-000.zip

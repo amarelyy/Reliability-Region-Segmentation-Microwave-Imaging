@@ -1,0 +1,18 @@
+using src from: D:\Reliability-Region-Segmentation-Microwave-Imaging\src
+[data_loading] 285 rows missing phantom_database.csv match — attempting fallback-table backfill...
+[data_loading] backfill recovered 144 rows; 141 still unmatched.
+[data_loading] tumor columns detected in cm -> converting to mm
+[data_loading] s21 scans: 1301  |  tumor_model rows: 504  |  usable range: 0..503
+[data_loading] Reconstructed freq_axis: 1001 points from 1-8 GHz
+  1/504
+  51/504
+  101/504
+  151/504
+  201/504
+  251/504
+  301/504
+  351/504
+  401/504
+  451/504
+  501/504
+saved results_audit\fixed\cache\recon_tumour_adisub.npz 504

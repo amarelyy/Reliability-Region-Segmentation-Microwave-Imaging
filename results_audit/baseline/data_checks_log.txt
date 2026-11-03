@@ -1,0 +1,62 @@
+[data_loading] 285 rows missing phantom_database.csv match — attempting fallback-table backfill...
+[data_loading] backfill recovered 144 rows; 141 still unmatched.
+[data_loading] tumor columns detected in cm -> converting to mm
+[data_loading] s21 scans: 1301  |  tumor_model rows: 504  |  usable range: 0..503
+[data_loading] Reconstructed freq_axis: 1001 points from 1-8 GHz
+s21 shape (1301, 1001, 72) metadata rows 1149 tumor_model rows 504
+metadata cols: [np.str_('n_expt'), np.str_('id'), np.str_('phant_id'), np.str_('tum_rad'), np.str_('tum_shape'), np.str_('tum_x'), np.str_('tum_y'), np.str_('tum_z'), np.str_('birads'), np.str_('adi_ref_id'), np.str_('emp_ref_id'), np.str_('date'), np.str_('n_session'), np.str_('ant_rad'), np.str_('ant_z'), np.str_('fib_ang'), np.str_('adi_x'), np.str_('adi_y'), np.str_('fib_ref_id'), np.str_('fib_x'), np.str_('fib_y'), np.str_('tum_in_fib'), 'original_s21_idx']
+phantom_db cols: ['phantom_id', 'shell', 'density_class', 'fib_model', 'shell_volume', 'breast_length', 'mean_radius', 'shell_radius', 'fib_volume', 'fib_percent']
+[metadata(all)] ant_rad missing: 0/1149  min=21.0 max=23.0  unique=[np.float64(21.0), np.float64(22.0), np.float64(23.0)]
+[tumor_model] ant_rad missing: 0/504  min=21.0 max=23.0  unique=[np.float64(21.0), np.float64(22.0), np.float64(23.0)]
+adi_x: missing=0 min=-0.5 max=0.5 nonzero=131 unique=[np.float64(-0.5), np.float64(0.0), np.float64(0.5)]
+adi_y: missing=0 min=-1.0 max=0.75 nonzero=76 unique=[np.float64(-1.0), np.float64(-0.5), np.float64(0.0), np.float64(0.5), np.float64(0.75)]
+fib_x: missing=0 min=-1.75 max=2.0 nonzero=36 unique=[np.float64(-1.75), np.float64(-1.5), np.float64(-1.0), np.float64(-0.75), np.float64(-0.5), np.float64(-0.25), np.float64(0.0), np.float64(0.5), np.float64(1.0), np.float64(2.0)]
+fib_y: missing=0 min=-2.0 max=2.0 nonzero=95 unique=[np.float64(-2.0), np.float64(-1.5), np.float64(-1.0), np.float64(0.0), np.float64(0.5), np.float64(0.75), np.float64(1.0), np.float64(1.5), np.float64(1.75), np.float64(2.0)]
+fib_ang: missing=2 min=-90.0 max=240.0 nonzero=420 unique=[np.float64(-90.0), np.float64(-75.0), np.float64(-60.0), np.float64(-45.0), np.float64(-30.0), np.float64(-15.0), np.float64(0.0), np.float64(15.0), np.float64(30.0), np.float64(45.0)]
+     csv_radius_min  csv_radius_max  table_mm   n  match
+adi                                                     
+A1             22.9            22.9      22.9  56   True
+A11            33.1            33.1      33.1  56   True
+A12            39.0            39.0      39.0  56   True
+A13            43.8            43.8      43.8  56   True
+A14            45.4            45.4      45.4  56   True
+A15            56.2            56.2      56.2  56   True
+A16            57.0            57.0      57.0  56   True
+A2             48.5            48.5      48.5  56   True
+A3             56.9            56.9      56.9  56   True
+phantom_db shell_radius sample:
+  phantom_id  shell_radius
+0       A2F1          48.5
+1       A2F2          48.5
+2       A2F4          48.5
+3       A2F5          48.5
+4      A2F11          48.5
+5      A2F12          48.5
+6      A2F13          48.5
+7      A2F14          48.5
+8       A3F2          56.9
+9       A3F3          56.9
+ref ids missing: emp 0  adi 0
+tumor dist from centre mm: min 0.0 max 57.1
+tumor radius unique: [np.float64(5.0), np.float64(10.0), np.float64(15.0)]
+--- tumour position vs own shell radius ---
+tumour centre beyond shell radius (chamber origin): 64/504
+tumour centre beyond shell radius (adi_x/adi_y centre): 63/504
+tumour edge beyond shell radius (r+tum_rad>R): 189/504
+        R  r_max  r_mean
+adi                     
+A1   22.9   40.7    22.0
+A11  33.1   53.0    27.0
+A12  39.0   43.7    27.4
+A13  43.8   48.1    31.8
+A14  45.4   53.0    32.6
+A15  56.2   43.7    32.0
+A16  57.0   57.1    35.6
+A2   48.5   43.7    30.2
+A3   56.9   57.1    37.3
+adipose centre offset |adi| (mm): mean 2.08 max 10.00, scans with offset>0: 202
+ant_rad counts: {22.0: 416, 21.0: 65, 23.0: 23}
+tumour outside image grid (|x| or |y| > 1.5R): 3/504
+tumour within 10 mm of own boundary (R-10 <= r): 181/504 = 35.9%
+same with fixed 45 mm radius (metrics_paper.py way): 38.3%
+tum_z unique: [np.float64(-6.7), np.float64(-6.5), np.float64(-6.3), np.float64(-6.2), np.float64(-6.0), np.float64(-5.75), np.float64(-5.7), np.float64(-5.6), np.float64(-5.5), np.float64(-5.0), np.float64(-4.5), np.float64(-4.25), np.float64(-4.0), np.float64(-3.2), np.float64(-3.0)]  ant_z unique: [np.float64(-6.51)]

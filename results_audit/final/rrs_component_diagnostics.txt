@@ -1,0 +1,16 @@
+EXPLORATORY: Spearman of each RRS factor with LE (negative = factor ranks correctly), phantom-cluster 95% CI
+  reliability_score  rho=+0.192  CI [+0.073, +0.313]
+  D_norm             rho=+0.177  CI [+0.083, +0.259]
+  cf_factor          rho=+0.040  CI [-0.059, +0.141]
+  one_minus_CC       rho=+0.187  CI [+0.072, +0.314]
+  geo_plausibility   rho=+0.071  CI [-0.070, +0.218]
+  pred_dist          rho=+0.069  CI [-0.071, +0.215]
+
+LE by predicted distance from centre (why G backfires):
+             n     LE  det15  gt_dist     G
+pred_dist                                  
+(0, 5]     111  29.50  18.92    29.64  0.14
+(5, 10]    141  29.20  15.60    29.03  0.39
+(10, 20]   202  32.32  13.37    28.65  0.68
+(20, 30]    31  32.81  25.81    33.60  1.00
+(30, 60]    19  32.81  31.58    27.01  1.00
