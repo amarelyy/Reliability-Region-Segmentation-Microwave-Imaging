@@ -1,0 +1,18 @@
+{
+  "seed": 42,
+  "n_splits": 5,
+  "epochs": 20,
+  "batch_size": 4,
+  "lr": 0.001,
+  "loss": "0.5*BCE+0.5*Dice (CombinedLoss)",
+  "threshold": 0.5,
+  "checkpoint_selection": "none (last epoch)",
+  "overfit_scans": 8,
+  "overfit_epochs": 100,
+  "inputs": "results_audit/final/cache/unet_inputs_final.npz",
+  "git_commit": "80412b650e249d2b7d054dfc5911081d307b55c2",
+  "git_branch": "fix/logic-refactor",
+  "git_dirty_files": "M unet/evaluate_unet.py\n?? research_notes/\n?? results_unet_fixed/",
+  "device": "cuda",
+  "torch": "2.5.1+cu121"
+}

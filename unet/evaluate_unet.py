@@ -120,6 +120,7 @@ def evaluate_unet() -> pd.DataFrame:
     # 3. Evaluasi Loop
     results: List[Dict[str, Any]] = []
     skipped = 0
+    skip_log: List[Dict[str, Any]] = []  # every skipped scan + reason (nothing is dropped silently)
 
     print(f"\nEvaluating {total_scans} scans...")
     for i in range(total_scans):
@@ -168,6 +169,7 @@ def evaluate_unet() -> pd.DataFrame:
             # Skip jika tidak ada tumor (healthy scan)
             if gt_mask.sum() == 0:
                 skipped += 1
+                skip_log.append({"scan_idx": i, "reason": "empty ground-truth mask"})
                 continue
 
             # Hitung Metrik
@@ -185,6 +187,8 @@ def evaluate_unet() -> pd.DataFrame:
 
         except Exception as e:
             skipped += 1
+            skip_log.append({"scan_idx": i, "reason": repr(e)[:200]})
+            print(f"  SKIPPED scan {i}: {e!r}")
             continue
 
     # 4. Summary
@@ -195,6 +199,8 @@ def evaluate_unet() -> pd.DataFrame:
     print(f"{'=' * 70}")
     print(f"Scans evaluated: {len(df)}")
     print(f"Scans skipped (no tumor / error): {skipped}")
+    if skip_log:
+        pd.DataFrame(skip_log).to_csv("rrs_mbi/results/unet_evaluation_skipped.csv", index=False)
     print(f"{'=' * 70}")
 
     if not df.empty:
