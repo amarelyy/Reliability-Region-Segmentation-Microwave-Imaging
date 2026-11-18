@@ -14,6 +14,7 @@ unet/ is changed:
   python reconstruction/reconstruct_images.py --all [--n-jobs 4] [--reuse]   # evaluate every scan ->
                                                        # results/ tables, render the top 10 -> images/
   python reconstruction/reconstruct_images.py --paper  # best / worst / median -> images/paper/
+  python reconstruction/reconstruct_images.py --ci     # full bootstrap CIs (per-scan CSV from --all) -> results/evaluation_ci.md
   python reconstruction/reconstruct_images.py          # 5 random scans (seed 42) -> images/
   python reconstruction/reconstruct_images.py --scans 44 220 --gamma-sweep
 
@@ -251,6 +252,135 @@ def build_tables(df):
     return "\n".join(parts), tabs
 
 
+# ----------------------------------------------------------------------------------------------
+# full bootstrap confidence intervals (phantom-cluster percentile bootstrap)
+# ----------------------------------------------------------------------------------------------
+BOOT_SEED = 42
+QUALITY = [("SCR (dB)", "scr_db"), ("SMR (dB)", "smr_db"), ("CNR", "cnr"), ("Dice", "dice"), ("IoU", "iou"),
+           ("Blob area (px)", "blob_area_px"), ("Size error (mm)", "size_err_mm"), ("CF at peak", "cf_at_peak"),
+           ("Peak distance from centre (mm)", "peak_dist_from_centre")]
+
+
+def _clusters(phant):
+    """Row-index arrays, one per phantom (scans of one phantom are not independent)."""
+    codes, uniq = pd.factorize(pd.Series(phant).reset_index(drop=True))
+    return [np.flatnonzero(codes == k) for k in range(len(uniq))]
+
+
+def bootstrap_ci(stats, clusters, n_boot=2000, seed=BOOT_SEED):
+    """Phantom-cluster percentile bootstrap. `stats` maps name -> f(ix) over row indices. Each resample
+    draws phantoms with replacement and recomputes EVERY statistic on the pooled rows.
+    Returns name -> (estimate, ci_lo, ci_hi)."""
+    rng = np.random.default_rng(seed)
+    n_cl = len(clusters)
+    est = {k: float(f(np.concatenate(clusters))) for k, f in stats.items()}
+    draws = {k: np.empty(n_boot) for k in stats}
+    for b in range(n_boot):
+        ix = np.concatenate([clusters[j] for j in rng.integers(0, n_cl, n_cl)])
+        for k, f in stats.items():
+            draws[k][b] = f(ix)
+    return {k: (est[k], *np.nanpercentile(draws[k], [2.5, 97.5])) for k in stats}
+
+
+def _fmt(t):
+    est, lo, hi = t
+    big = max(abs(est), abs(lo), abs(hi))
+    dec = 3 if big < 1 else (1 if big >= 100 else 2)
+    return "%.*f [%.*f, %.*f]" % (dec, est, dec, lo, dec, hi)
+
+
+def _arrays(d):
+    return {c: d[c].to_numpy(float) for c in d.columns if d[c].dtype.kind in "fiub"}
+
+
+def _overall_stats(A):
+    S = {}
+    for tag, col in (("pipe", "LE"), ("centre", "LE_trivial")):
+        x = A[col]
+        S[tag + "|mean"] = lambda ix, x=x: x[ix].mean()
+        S[tag + "|median"] = lambda ix, x=x: np.median(x[ix])
+        S[tag + "|p25"] = lambda ix, x=x: np.percentile(x[ix], 25)
+        S[tag + "|p75"] = lambda ix, x=x: np.percentile(x[ix], 75)
+        S[tag + "|sd"] = lambda ix, x=x: x[ix].std(ddof=1)
+        for t in (10, 15, 20):
+            S[tag + "|det%d" % t] = lambda ix, x=x, t=t: (x[ix] <= t).mean() * 100
+    a, b = A["LE"], A["LE_trivial"]
+    S["diff|mean"] = lambda ix: (a[ix] - b[ix]).mean()
+    S["diff|median"] = lambda ix: np.median(a[ix] - b[ix])
+    S["diff|better"] = lambda ix: (a[ix] < b[ix]).mean() * 100
+    S["diff|det15"] = lambda ix: ((a[ix] <= 15).mean() - (b[ix] <= 15).mean()) * 100
+    for _, col in QUALITY:
+        x = A[col]
+        S[col + "|mean"] = lambda ix, x=x: x[ix].mean()
+        S[col + "|median"] = lambda ix, x=x: np.median(x[ix])
+    S["rate|gt_in_blob"] = lambda ix: A["gt_in_blob"][ix].mean() * 100
+    S["rate|size5"] = lambda ix: (A["size_err_mm"][ix] <= 5).mean() * 100
+    S["rate|dice0"] = lambda ix: (A["dice"][ix] == 0).mean() * 100
+    return S
+
+
+def _group_stats(A):
+    a, b = A["LE"], A["LE_trivial"]
+    return {"LE": lambda ix: a[ix].mean(), "centre": lambda ix: b[ix].mean(),
+            "diff": lambda ix: (a[ix] - b[ix]).mean(), "det15": lambda ix: (a[ix] <= 15).mean() * 100,
+            "dice": lambda ix: A["dice"][ix].mean(), "scr": lambda ix: A["scr_db"][ix].mean()}
+
+
+def build_ci_tables(df, n_boot=2000):
+    """All evaluation numbers with phantom-cluster bootstrap 95% CIs. Returns (markdown, long DataFrame)."""
+    parts = ["Phantom-cluster percentile bootstrap: %d resamples of %d phantoms drawn with replacement (seed %d); "
+             "every statistic is recomputed in each resample. Format: estimate [95%% CI]. Group tables resample "
+             "the phantoms that contribute to that group." % (n_boot, df["phant_id"].nunique(), BOOT_SEED), ""]
+    long = []
+
+    R = bootstrap_ci(_overall_stats(_arrays(df)), _clusters(df["phant_id"]), n_boot)
+    for k, t in R.items():
+        long.append(dict(table="overall", row=k.split("|")[0], stat=k.split("|")[-1], estimate=t[0], ci_lo=t[1], ci_hi=t[2]))
+
+    labs = [("mean", "mean"), ("median", "median"), ("p25", "p25"), ("p75", "p75"), ("SD", "sd"),
+            ("det@10 (%)", "det10"), ("det@15 (%)", "det15"), ("det@20 (%)", "det20")]
+    T1 = pd.DataFrame({name: {lab: _fmt(R[tag + "|" + k]) for lab, k in labs}
+                       for name, tag in (("Pipeline peak", "pipe"), ("Centre guess", "centre"))}).T
+    T1.index.name = "Localisation error (mm)"
+    T2 = pd.DataFrame({"Mean diff (mm)": [_fmt(R["diff|mean"])], "Median diff (mm)": [_fmt(R["diff|median"])],
+                       "Pipeline better (% scans)": [_fmt(R["diff|better"])],
+                       "det@15 diff (pct. points)": [_fmt(R["diff|det15"])]}, index=["pipeline - centre guess"])
+    T2.index.name = "Paired difference"
+    T3 = pd.DataFrame({"mean [95% CI]": [_fmt(R[c + "|mean"]) for _, c in QUALITY],
+                       "median [95% CI]": [_fmt(R[c + "|median"]) for _, c in QUALITY]},
+                      index=[lab for lab, _ in QUALITY])
+    T3.index.name = "Image quality and segmentation (pipeline blob)"
+    T4 = pd.DataFrame({"GT inside blob (% scans)": [_fmt(R["rate|gt_in_blob"])],
+                       "Size error <= 5 mm (% scans)": [_fmt(R["rate|size5"])],
+                       "Dice = 0 (% scans)": [_fmt(R["rate|dice0"])]}, index=["pipeline blob"])
+    T4.index.name = "Blob"
+    parts += [md(T1), "", md(T2), "Positive means the pipeline is worse than the centre guess.", "", md(T3), "", md(T4), ""]
+
+    def group_table(title, groups):
+        rows = {}
+        for label, sub in groups:
+            r = bootstrap_ci(_group_stats(_arrays(sub)), _clusters(sub["phant_id"]), n_boot)
+            rows[label] = {"n": len(sub), "phantoms": sub["phant_id"].nunique(),
+                           "mean LE (mm)": _fmt(r["LE"]), "centre-guess LE (mm)": _fmt(r["centre"]),
+                           "diff (mm)": _fmt(r["diff"]), "det@15 (%)": _fmt(r["det15"]),
+                           "mean Dice": _fmt(r["dice"]), "mean SCR (dB)": _fmt(r["scr"])}
+            for k, t in r.items():
+                long.append(dict(table=title, row=label, stat=k, estimate=t[0], ci_lo=t[1], ci_hi=t[2]))
+        T = pd.DataFrame(rows).T
+        T.index.name = title
+        return T
+
+    edges, names = [-0.1, 10, 20, 30, 40, 200], ["0-10", "10-20", "20-30", "30-40", ">40"]
+    band = pd.cut(df["gt_dist_from_centre"], edges, labels=names)
+    parts += [md(group_table("True distance from centre (mm)", [(nm, df[band == nm]) for nm in names])), ""]
+    parts += [md(group_table("Tumour radius (mm)",
+                             [(str(int(r)), df[df["tumour_r_mm"] == r]) for r in sorted(df["tumour_r_mm"].unique())])), ""]
+    has = df["birads"].notna()
+    parts += [md(group_table("BI-RADS", [(str(int(b)), df[df["birads"] == b]) for b in sorted(df.loc[has, "birads"].unique())])),
+              "%d scans have no BI-RADS and are excluded (n = %d)." % ((~has).sum(), has.sum()), ""]
+    return "\n".join(parts), pd.DataFrame(long)
+
+
 def select_top(df, k=10):
     lr = df["LE"].rank(pct=True)                                    # low LE = good
     cr = (-df["peak_margin"]).rank(pct=True, na_option="bottom")    # high margin = clean = good
@@ -421,10 +551,21 @@ def main():
     ap.add_argument("--metrics-only", action="store_true")
     ap.add_argument("--reuse", action="store_true", help="reuse results/per_scan_metrics.csv")
     ap.add_argument("--paper", action="store_true", help="best / worst / median -> images/paper/")
+    ap.add_argument("--ci", action="store_true",
+                    help="full phantom-cluster bootstrap CIs from results/per_scan_metrics.csv -> results/evaluation_ci.md")
+    ap.add_argument("--n-boot", type=int, default=2000)
     ap.add_argument("--gamma-sweep", action="store_true")
     ap.add_argument("--cf-power", type=float, nargs="?", const=CFG["cf_power"], default=None,
                     help="opt-in: display image re-beamformed with this CF exponent (peak unchanged)")
     args = ap.parse_args()
+
+    if args.ci:   # needs only the per-scan table, no data loading
+        RESULTS.mkdir(parents=True, exist_ok=True)
+        text, long = build_ci_tables(pd.read_csv(RESULTS / "per_scan_metrics.csv"), args.n_boot)
+        (RESULTS / "evaluation_ci.md").write_text(text + "\n", encoding="utf-8")
+        long.to_csv(RESULTS / "ci_long.csv", index=False)
+        print(text)
+        return
 
     data = load_all_data()
     tm = data["tumor_model"]

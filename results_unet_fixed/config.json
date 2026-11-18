@@ -9,10 +9,10 @@
   "checkpoint_selection": "none (last epoch)",
   "overfit_scans": 8,
   "overfit_epochs": 100,
-  "inputs": "results_audit/final/cache/unet_inputs_final.npz",
-  "git_commit": "80412b650e249d2b7d054dfc5911081d307b55c2",
-  "git_branch": "fix/logic-refactor",
-  "git_dirty_files": "M unet/evaluate_unet.py\n?? research_notes/\n?? results_unet_fixed/",
+  "inputs": "results_unet_fixed/cache/unet_inputs.npz",
+  "git_commit": "1ec1ae0b3842ef9c9df3998b3ad3b528007bc242",
+  "git_branch": "main",
+  "git_dirty_files": "",
   "device": "cuda",
   "torch": "2.5.1+cu121"
 }
