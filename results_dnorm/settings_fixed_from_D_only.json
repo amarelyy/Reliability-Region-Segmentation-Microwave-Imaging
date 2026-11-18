@@ -1,0 +1,24 @@
+{
+  "D_p95_of_504": 33.39087121503812,
+  "percentile_method": "numpy default (linear interpolation)",
+  "settings": [
+    [
+      "a_linear_sat5_old",
+      "linear",
+      5.0
+    ],
+    [
+      "b_linear_p95",
+      "linear",
+      33.39087121503812
+    ],
+    [
+      "c_log_p95",
+      "log",
+      33.39087121503812
+    ]
+  ],
+  "source": "results_audit\\baseline\\report_original\\metrics_raw.csv",
+  "git_commit": "8a8ea4b2e758e5be30934e1343ba90d81e9bedeb",
+  "git_dirty": "M rrs_mbi/metrics.py\n?? research_notes/\n?? results_dnorm/"
+}

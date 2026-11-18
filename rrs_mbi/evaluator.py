@@ -23,18 +23,40 @@ def compute_localization_error(pred: Tuple[float, float], true: Tuple[float, flo
     return float(np.sqrt((pred[0] - true[0])**2 + (pred[1] - true[1])**2))
 
 
-def bootstrap_ci(errors: np.ndarray, n_boot: int = 1000, conf: float = 0.95) -> Tuple[float, float]:
+def bootstrap_ci(errors: np.ndarray, n_boot: int = 1000, conf: float = 0.95, seed: int = 42) -> Tuple[float, float]:
     if len(errors) == 0:
         return 0.0, 0.0
+    rng = np.random.default_rng(seed)
     e = np.asarray(errors, dtype=np.float64).ravel()
     means = [
-        float(np.mean(np.random.choice(e, size=len(e), replace=True)))
+        float(np.mean(rng.choice(e, size=len(e), replace=True)))
         for _ in range(n_boot)
     ]
     alpha = 1.0 - conf
     lo = float(np.percentile(means, 100 * alpha / 2))
     hi = float(np.percentile(means, 100 * (1 - alpha / 2)))
     return lo, hi
+
+
+def cluster_bootstrap(df: pd.DataFrame, stat, n_boot: int = 2000, seed: int = 42,
+                      group_col: str = "scan_id") -> np.ndarray:
+    """Phantom-cluster bootstrap: resample PHANTOMS with replacement (scans of one phantom
+    are not independent), recompute `stat(resampled_df)` each time (including any top-k
+    selection, so selection variability is part of the interval)."""
+    rng = np.random.default_rng(seed)
+    groups = {g: d for g, d in df.groupby(group_col)}
+    keys = np.array(list(groups))
+    out = []
+    for _ in range(n_boot):
+        pick = rng.choice(keys, size=len(keys), replace=True)
+        out.append(stat(pd.concat([groups[k] for k in pick], ignore_index=True)))
+    return np.asarray(out, dtype=np.float64)
+
+
+def top_fraction_gap(d: pd.DataFrame, frac: float) -> float:
+    """Mean LE of all scans minus mean LE of the top-`frac` scans by reliability (>0 = R helps)."""
+    n = max(1, int(len(d) * frac))
+    return float(d["localization_error"].mean() - d.nlargest(n, "reliability_score")["localization_error"].mean())
 
 
 def run_evaluation() -> pd.DataFrame:
@@ -44,6 +66,7 @@ def run_evaluation() -> pd.DataFrame:
     s21 = data["s21"]
     tumor_model = data["tumor_model"]
     id_to_original_idx = data["id_to_original_idx"]
+    freq_axis = data["freq_axis"]
 
     # ==================================================================
     # DIAGNOSTIC: Cek ketersediaan Ground Truth
@@ -73,8 +96,11 @@ def run_evaluation() -> pd.DataFrame:
     # Sample check
     try:
         sample = reconstruct_scan(
-            0, s21, tumor_model, id_to_original_idx, return_diagnostics=True
-        )  # type: ignore
+            0, s21, tumor_model, id_to_original_idx,
+            freq_axis=freq_axis, use_tvsvd=True, use_rms_norm=True,
+            bandpass_mode="full", gate_ns=0.70,
+            return_diagnostics=True
+        )
         print(
             f"   Sample gt_x_mm={sample.get('gt_x_mm')}, "
             f"gt_y_mm={sample.get('gt_y_mm')}, "
@@ -98,12 +124,24 @@ def run_evaluation() -> pd.DataFrame:
 
         try:
             res = reconstruct_scan(
-                i, s21, tumor_model, id_to_original_idx, return_diagnostics=True
-            )  # type: ignore
+                i, s21, tumor_model, id_to_original_idx,
+                freq_axis=freq_axis,
+                use_tvsvd=True,
+                use_rms_norm=True,
+                bandpass_mode="full",
+                gate_ns=0.70,
+                return_diagnostics=True
+            )
 
             img = res["diagnostics"]["image"]
             axis_mm = res["diagnostics"]["axis_mm"]
-            rel_metrics = evaluate_scan_reliability(img)
+            cf_val = res.get("cf_at_peak", None)
+            center = (float(res["shell_cx_mm"]), float(res["shell_cy_mm"]))
+            # D, G and CF are all evaluated at the SAME predicted point that LE is computed for
+            rel_metrics = evaluate_scan_reliability(img, axis_mm=axis_mm, cf_at_peak=cf_val,
+                                                    saturation_radius_mm=20.0,
+                                                    peak_xy=(res["peak_x_mm"], res["peak_y_mm"]),
+                                                    center_xy=center)
 
             # Ground Truth
             gt_x = float(res.get("gt_x_mm", np.nan))
@@ -144,9 +182,16 @@ def run_evaluation() -> pd.DataFrame:
                 # Reliability
                 "reliability_score": rel_metrics["reliability_score"],
                 "peak_dominance": rel_metrics["peak_dominance"],
-                "boundary_risk": rel_metrics["boundary_risk"],
+                "central_concentration": rel_metrics.get("central_concentration", float("nan")),
+                "geo_plausibility": rel_metrics["geo_plausibility"],
+                "cf_factor": rel_metrics["cf_factor"],
                 # Localization
                 "localization_error": loc_error,
+                # Trivial reference: always predict the shell centre (no imaging at all)
+                "trivial_center_error": compute_localization_error(center, (gt_x, gt_y)),
+                "shell_cx_mm": center[0],
+                "shell_cy_mm": center[1],
+                "breast_radius_mm": float(res["breast_radius_mm"]),
                 "pred_x_mm": pred_x,
                 "pred_y_mm": pred_y,
                 "true_x_mm": gt_x,
@@ -162,9 +207,16 @@ def run_evaluation() -> pd.DataFrame:
                 "scr_db": float(res.get("scr_db", np.nan)),
                 "smr_db": float(res.get("smr_db", np.nan)),
                 "cnr": float(res.get("cnr", np.nan)),
+                # Pipeline config traceability  <-- DI SINI
+                "tvsvd_removed": int(res.get("tvsvd_removed", 0)),
+                "gate_ns": float(res.get("gate_ns", np.nan)),
+                "use_rms_norm": bool(res.get("use_rms_norm", False)),
+                "bandpass_mode": res.get("bandpass_mode", "full"),
+                "ref_col": res.get("ref_col", ""),
             })
 
         except Exception as e:
+            print(f"  Scan {i} FAILED: {e}")
             skipped.append(i)
             continue
 
@@ -189,7 +241,11 @@ def analyze_thresholds(df: pd.DataFrame, num_thresholds: int = 10) -> pd.DataFra
         if len(errs) == 0:
             continue
 
-        ci_lo, ci_hi = bootstrap_ci(errs)
+        # Phantom-cluster bootstrap with re-selection of the top-`ratio` scans in each resample
+        boots = cluster_bootstrap(
+            df, lambda d, r=ratio: float(d.nlargest(max(1, int(len(d) * r)), "reliability_score")["localization_error"].mean()),
+            n_boot=1000)
+        ci_lo, ci_hi = float(np.percentile(boots, 2.5)), float(np.percentile(boots, 97.5))
 
         loc_detected = int(np.sum(errs <= 15.0))
         loc_det_rate = loc_detected / len(errs) * 100
@@ -213,6 +269,7 @@ def analyze_thresholds(df: pd.DataFrame, num_thresholds: int = 10) -> pd.DataFra
             "scans_kept": n_keep,
             "actual_threshold": float(subset["reliability_score"].iloc[-1]),
             "mean_error_mm": float(np.mean(errs)),
+            "mean_trivial_error_mm": float(subset["trivial_center_error"].mean()),
             "std_error_mm": float(np.std(errs)),
             "ci_lower": ci_lo,
             "ci_upper": ci_hi,
@@ -275,6 +332,36 @@ def plot_selective_classification_curve(
     print(f"Plot saved to {save_path}")
     plt.close()
 
+def run_permutation_test(df, n_top=50, n_perm=10000, seed=42):
+    """Test apakah top-N reliable scans punya mean error signifikan lebih rendah dari random."""
+    rng = np.random.default_rng(seed)
+    errors = df["localization_error"].dropna().to_numpy()
+    
+    # Observed: mean error of top-N by reliability
+    sorted_by_rel = df.sort_values("reliability_score", ascending=False).head(n_top)
+    observed_mean = sorted_by_rel["localization_error"].mean()
+    
+    # Null distribution: random samples of same size
+    random_means = np.array([
+        rng.choice(errors, size=n_top, replace=False).mean()
+        for _ in range(n_perm)
+    ])
+    
+    p_value = float(np.mean(random_means <= observed_mean))
+    
+    print(f"\n--- Permutation Test (top-{n_top} vs random) ---")
+    print(f"  Observed mean error (top-{n_top}): {observed_mean:.2f} mm")
+    print(f"  Full dataset mean error:           {errors.mean():.2f} mm")
+    print(f"  Difference:                        {errors.mean() - observed_mean:.2f} mm")
+    print(f"  Permutation p-value ({n_perm} iters):   {p_value:.4f}")
+    if p_value < 0.05:
+        print(f"  ✅ Significant at alpha=0.05")
+    elif p_value < 0.10:
+        print(f"  ⚠️  Marginal (p < 0.10)")
+    else:
+        print(f"  ❌ Not significant")
+    
+    return p_value
 
 def main() -> None:
     print("=" * 70)
@@ -287,6 +374,54 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     df.to_csv(out_dir / "metrics_raw.csv", index=False)
 
+        # === STRATIFIED COHORT ANALYSIS (per phantom) ===
+    print("\n" + "=" * 70)
+    print("STRATIFIED COHORT ANALYSIS (per phantom)")
+    print("=" * 70)
+
+    phantom_stats = df.groupby("scan_id").agg(
+        n_scans=("localization_error", "count"),
+        mean_error=("localization_error", "mean"),
+        median_error=("localization_error", "median"),
+        det_rate=("localization_error", lambda x: (x <= 15.0).mean() * 100),
+        mean_reliability=("reliability_score", "mean"),
+    ).reset_index()
+
+    print(f"\nPhantoms evaluated: {len(phantom_stats)}")
+    print(f"Scans per phantom: min={phantom_stats['n_scans'].min()}, "
+          f"max={phantom_stats['n_scans'].max()}, "
+          f"mean={phantom_stats['n_scans'].mean():.1f}")
+
+    print(f"\n--- Per-Phantom Localization ---")
+    print(f"  Mean of phantom mean errors:   {phantom_stats['mean_error'].mean():.2f} mm")
+    print(f"  Median of phantom mean errors: {phantom_stats['mean_error'].median():.2f} mm")
+    print(f"  Std across phantoms:           {phantom_stats['mean_error'].std():.2f} mm")
+
+    print(f"\n--- Per-Phantom Detection Rate ---")
+    print(f"  Mean det rate across phantoms: {phantom_stats['det_rate'].mean():.1f}%")
+    print(f"  Phantoms with det rate > 0%:   {(phantom_stats['det_rate'] > 0).sum()}/{len(phantom_stats)}")
+
+    print(f"\n--- Per-Phantom Reliability ---")
+    print(f"  Mean reliability across phantoms: {phantom_stats['mean_reliability'].mean():.4f}")
+
+    # Simpan ke CSV
+    phantom_stats.to_csv(out_dir / "phantom_level_stats.csv", index=False)
+    print(f"\nPhantom-level stats saved to {out_dir / 'phantom_level_stats.csv'}")
+
+    # === CORRELATION AT PHANTOM LEVEL ===
+    from scipy.stats import spearmanr, pearsonr
+    p_rel = phantom_stats["mean_reliability"].to_numpy()
+    p_err = phantom_stats["mean_error"].to_numpy()
+    valid_p = ~(np.isnan(p_rel) | np.isnan(p_err))
+
+    if valid_p.sum() > 2:
+        rho_p, p_rho_p = spearmanr(p_rel[valid_p], p_err[valid_p])
+        r_p, p_r_p = pearsonr(p_rel[valid_p], p_err[valid_p])
+        print(f"\n--- Phantom-Level Correlation ---")
+        print(f"  Spearman rho: {rho_p:+.3f} (p={p_rho_p:.4f}), N={valid_p.sum()}")
+        print(f"  Pearson r:    {r_p:+.3f} (p={p_r_p:.4f})")
+    # === END STRATIFIED COHORT ===
+    
     # 2. Threshold Analysis
     thresh_df = analyze_thresholds(df)
     thresh_df.to_csv(out_dir / "threshold_analysis.csv", index=False)
@@ -324,7 +459,15 @@ def main() -> None:
     print(f"\n--- Reliability ---")
     print(f"  Mean Score:       {df['reliability_score'].mean():.4f}")
     print(f"  Mean Dominance:   {df['peak_dominance'].mean():.2f}")
-    print(f"  Mean Boundary Risk: {df['boundary_risk'].mean():.4f}")
+    print(f"  Mean CC:          {df['central_concentration'].mean():.4f}")
+    print(f"  Mean G:           {df['geo_plausibility'].mean():.4f}")
+
+    print(f"\n--- Trivial reference (always predict the shell centre) ---")
+    print(f"  Mean trivial error:   {df['trivial_center_error'].mean():.2f} mm "
+          f"(pipeline {df['localization_error'].mean():.2f} mm)")
+    print(f"  Trivial detection (<=15mm): {(df['trivial_center_error'] <= 15).mean() * 100:.1f}%")
+    print(f"  Scans where pipeline beats trivial: "
+          f"{(df['localization_error'] < df['trivial_center_error']).mean() * 100:.1f}%")
 
     print(f"\n--- Threshold Analysis ---")
     print(f"{'Kept':<8} | {'Thresh':<10} | {'MeanErr':<10} | {'Std':<8} | {'DetRate':<8} | {'95% CI'}")
@@ -336,6 +479,73 @@ def main() -> None:
             f"{r['loc_detection_rate_pct']:<7.1f}% | "
             f"[{r['ci_lower']:.2f}-{r['ci_upper']:.2f}]"
         )
+        
+        # 3. Print Complete Summary
+    # ... existing summary code ...
+
+    # === PERMUTATION TEST ===
+    perm_p = run_permutation_test(df, n_top=50, n_perm=10000)
+
+    # === CONFUSION MATRIX WITH DATA-ADAPTIVE THRESHOLDS ===
+    rel_high = float(df["reliability_score"].quantile(0.67))
+    rel_low = float(df["reliability_score"].quantile(0.33))
+    
+    acc = df["localization_error"] <= 15.0
+    high = df["reliability_score"] >= rel_high
+    low = df["reliability_score"] < rel_low
+    
+    print(f"\n--- Confusion Matrix (adaptive thresholds: high>={rel_high:.4f}, low<{rel_low:.4f}) ---")
+    print(f"  TP (accurate + high rel):        {int((acc & high).sum())}")
+    print(f"  Fortuitous (accurate + low rel): {int((acc & low).sum())}")
+    print(f"  TN (inaccurate + low rel):       {int((~acc & low).sum())}")
+    print(f"  FP (inaccurate + high rel):      {int((~acc & high).sum())}")
+    print(f"  Unclassified (medium rel):       {int((~high & ~low).sum())}")
+        
+    from scipy.stats import chi2_contingency, spearmanr as _spearman
+    tier = np.where(high, "high", np.where(low, "low", "medium"))
+    ct = pd.crosstab(tier, acc)
+    chi2, p_chi, dof, exp = chi2_contingency(ct.values)
+    print(f"  Chi-square (3 tiers x accurate): chi2={chi2:.2f}, dof={dof}, p={p_chi:.4f}, "
+          f"min expected={exp.min():.1f}  [assumes independent scans]")
+
+    # === CLUSTER-ROBUST INFERENCE (resample phantoms; scans of a phantom are not independent) ===
+    def _tier_det_diff(d):
+        hi_t, lo_t = d["reliability_score"].quantile(0.67), d["reliability_score"].quantile(0.33)
+        a = d["localization_error"] <= 15.0
+        return float(a[d["reliability_score"] >= hi_t].mean() - a[d["reliability_score"] < lo_t].mean())
+
+    stats = {
+        "spearman_R_vs_LE": lambda d: float(_spearman(d["reliability_score"], d["localization_error"])[0]),
+        "gap_top10pct_mm": lambda d: top_fraction_gap(d, 0.10),
+        "gap_top20pct_mm": lambda d: top_fraction_gap(d, 0.20),
+        "gap_top50scans_mm": lambda d: top_fraction_gap(d, 50 / len(d)),
+        "det_high_minus_low_tier": _tier_det_diff,
+        "top10pct_LE_minus_trivial_mm": lambda d: float(
+            (lambda s: s["localization_error"].mean() - s["trivial_center_error"].mean())(
+                d.nlargest(max(1, int(len(d) * 0.10)), "reliability_score"))),
+    }
+    rows = []
+    print(f"\n--- Cluster-robust inference (phantom bootstrap, 2000x) ---")
+    for name, fn in stats.items():
+        b = cluster_bootstrap(df, fn, n_boot=2000)
+        est = fn(df)
+        lo_ci, hi_ci = np.percentile(b, [2.5, 97.5])
+        # one-sided bootstrap p for the hypothesised direction (R helps / beats trivial)
+        expect_negative = name in ("spearman_R_vs_LE", "top10pct_LE_minus_trivial_mm")
+        p_one = float(np.mean(b >= 0)) if expect_negative else float(np.mean(b <= 0))
+        rows.append(dict(statistic=name, estimate=est, ci_lo=lo_ci, ci_hi=hi_ci, boot_p_one_sided=p_one))
+        print(f"  {name:30s} {est:+.3f}  95% CI [{lo_ci:+.3f}, {hi_ci:+.3f}]  one-sided p~{p_one:.4f}")
+    pd.DataFrame(rows).to_csv(out_dir / "cluster_inference.csv", index=False)
+
+    acc = df["localization_error"] <= 15.0
+    high = df["reliability_score"] >= 0.70
+    low = df["reliability_score"] < 0.30
+    print(f"\n--- Confusion Matrix (fixed bands 0.30/0.70; descriptive only) ---")
+    print(f"  TP (accurate + high rel):        {int((acc & high).sum())}")
+    print(f"  Fortuitous (accurate + low rel): {int((acc & low).sum())}")
+    print(f"  TN (inaccurate + low rel):       {int((~acc & low).sum())}")
+    print(f"  FP (inaccurate + high rel):      {int((~acc & high).sum())}")
+    
     print("=" * 70)
 
     # 4. Plot

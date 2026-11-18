@@ -12,8 +12,10 @@ import numpy as np
 from scipy.interpolate import interp1d
 from scipy.signal.windows import tukey
 
-ANTENNA_WINDOW_ALPHA = 0.2
-GATE_NS = 0.5   # zero out samples before this — pre-tissue direct antenna
+ANTENNA_WINDOW_ALPHA = 0.0  # was 0.2: a Tukey taper over the antenna INDEX down-weights the
+                            # first/last ~7 positions, i.e. a ~70 deg sector around the start
+                            # angle. A closed circular array has no aperture edge -> uniform.
+GATE_NS = 0.70  # zero out samples before this — pre-tissue direct antenna
                  # coupling/crosstalk can't physically be a tissue reflection
 
 
@@ -132,10 +134,9 @@ def dmas(time_signal_magnitude, time_axis, delay_grid, subsample=3, window=None,
 
 
 def dmas_cf(time_signal_complex, time_signal_magnitude, time_axis, delay_grid,
-            subsample=3, window=None, cf_power=1.0):
-    """DMAS image weighted by the CF map computed from the full-array
-    coherent (complex) signal — reuses das_coherent_cf's cf_map rather than
-    recomputing CF from the DMAS-subsampled channels."""
-    _, cf_map, _ = das_coherent_cf(time_signal_complex, time_axis, delay_grid, window=window)
-    dmas_img = dmas(time_signal_magnitude, time_axis, delay_grid, subsample=subsample, window=window)
+            subsample=3, window=None, cf_power=1.0, gate_ns=GATE_NS):
+    _, cf_map, _ = das_coherent_cf(time_signal_complex, time_axis, delay_grid,
+                                   window=window, gate_ns=gate_ns)
+    dmas_img = dmas(time_signal_magnitude, time_axis, delay_grid,
+                   subsample=subsample, window=window, gate_ns=gate_ns)
     return dmas_img * (cf_map ** cf_power), cf_map

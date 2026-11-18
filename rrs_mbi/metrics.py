@@ -5,7 +5,8 @@ Heuristic Reliability Metrics for Microwave Breast Imaging.
 
 import numpy as np
 from scipy import ndimage
-from typing import Dict
+from typing import Dict, Optional
+
 
 def extract_breast_mask(image: np.ndarray, threshold_percentile: float = 15.0) -> np.ndarray:
     if not isinstance(image, np.ndarray) or image.size == 0:
@@ -18,40 +19,33 @@ def extract_breast_mask(image: np.ndarray, threshold_percentile: float = 15.0) -
     threshold = float(np.percentile(valid_pixels, threshold_percentile))
     mask = (image > threshold).astype(bool)
     
-    # Pylance fix: SciPy stubs incorrectly suggest this can return None. 
-    # We know it returns an ndarray, so we safely ignore the warning.
     mask = ndimage.binary_fill_holes(mask).astype(bool)  # type: ignore
-    
-    # Pylance fix: SciPy stubs incorrectly infer this return type as non-iterable.
-    # We know it returns a tuple (ndarray, int), so we safely ignore the warning.
     labeled_mask, num_features = ndimage.label(mask)  # type: ignore
     
     if num_features == 0:
         return np.zeros_like(image, dtype=bool)
         
     counts = np.bincount(labeled_mask.flat)
-    counts[0] = 0  # Abaikan background (label 0)
+    counts[0] = 0
     largest_component = int(np.argmax(counts))
     
     return (labeled_mask == largest_component).astype(bool)
 
 
-def calculate_peak_dominance(image: np.ndarray, mask: np.ndarray) -> float:
+def calculate_peak_dominance(image: np.ndarray, mask: np.ndarray, peak_coords=None) -> float:
+    """peak_coords: (iy, ix) of the predicted point; None = global argmax."""
     if not np.any(mask):
         return 0.0
 
-    peak_val = float(np.max(image))
-    peak_idx = int(np.argmax(image))
-    peak_coords = np.unravel_index(peak_idx, image.shape)
+    if peak_coords is None:
+        peak_coords = np.unravel_index(int(np.argmax(image)), image.shape)
+    peak_val = float(image[peak_coords])
     
     y, x = np.ogrid[:image.shape[0], :image.shape[1]]
     exclusion_zone = ((y - peak_coords[0])**2 + (x - peak_coords[1])**2) <= 25
     
-    # Pylance fix: Same SciPy stub issue as above
     internal_mask = ndimage.binary_erosion(mask.astype(bool), iterations=3).astype(bool)  # type: ignore
-    
     clutter_mask = np.logical_and(internal_mask, np.logical_not(exclusion_zone))
-    
     clutter_pixels = image[clutter_mask]
     
     if len(clutter_pixels) < 10:
@@ -71,7 +65,6 @@ def calculate_boundary_artifact_risk(image: np.ndarray, mask: np.ndarray, bounda
     if not np.any(mask):
         return 1.0
 
-    # Pylance fix: Force explicit casting to satisfy Pylance's strict ndarray check
     dist_map = np.asarray(ndimage.distance_transform_edt(mask), dtype=np.float64)  # type: ignore
     max_dist = float(np.max(dist_map))
     
@@ -79,8 +72,6 @@ def calculate_boundary_artifact_risk(image: np.ndarray, mask: np.ndarray, bounda
         return 1.0
 
     boundary_threshold = max_dist * (1.0 - boundary_ratio)
-    
-    # Use np.less to avoid Pylance operator overloading inference issues
     boundary_mask = np.logical_and(mask, np.less(dist_map, boundary_threshold))
     
     energy_boundary = float(np.sum(image[boundary_mask]**2)) + 1e-10
@@ -89,16 +80,77 @@ def calculate_boundary_artifact_risk(image: np.ndarray, mask: np.ndarray, bounda
     return float(min(1.0, energy_boundary / energy_total))
 
 
-def evaluate_scan_reliability(image: np.ndarray) -> Dict[str, float]:
+def calculate_geometric_plausibility(image, axis_mm, saturation_radius_mm=20.0,
+                                     peak_xy=None, center_xy=(0.0, 0.0)):
+    """
+    NEW — Geometric-plausibility prior.
+
+    The circular antenna array produces a known coherent artifact at the array
+    centre. A reconstruction peak sitting on/near that centre is therefore more
+    likely to be artifact than a true target, while a peak displaced away from
+    the centre is more plausible. This factor down-weights central peaks and
+    saturates to 1.0 once the peak is beyond `saturation_radius_mm`.
+
+    Uses only general imaging-geometry knowledge (NOT per-scan ground truth).
+    peak_xy: predicted point in mm (None = global argmax); distance is measured from
+    center_xy (the array/shell centre), in mm.
+    """
+    if axis_mm is None:
+        return 1.0
+
+    if peak_xy is None:
+        peak_iy, peak_ix = np.unravel_index(np.argmax(image), image.shape)
+        peak_xy = (float(axis_mm[peak_ix]), float(axis_mm[peak_iy]))
+    pred_dist = float(np.hypot(peak_xy[0] - center_xy[0], peak_xy[1] - center_xy[1]))
+
+    return float(min(1.0, pred_dist / saturation_radius_mm))
+
+def calculate_central_concentration(image, mask, axis_mm, center_xy=(0.0, 0.0)):
+    """Fraksi energi dalam radius 10mm dari pusat (center_xy, mm). Tinggi = artifact dominan."""
+    if axis_mm is None or not np.any(mask):
+        return 0.5
+    Y, X = np.meshgrid(axis_mm, axis_mm, indexing='ij')
+    dist = np.sqrt((X - center_xy[0])**2 + (Y - center_xy[1])**2)
+    center_mask = mask & (dist <= 10.0)
+    if not np.any(center_mask):
+        return 0.0
+    e_center = float(np.sum(image[center_mask]**2))
+    e_total = float(np.sum(image[mask]**2)) + 1e-10
+    return min(1.0, e_center / e_total)
+
+def evaluate_scan_reliability(image, axis_mm=None, cf_at_peak=None,
+                              saturation_radius_mm=20.0, peak_xy=None,
+                              center_xy=(0.0, 0.0)) -> Dict[str, float]:
+    """peak_xy: the predicted tumour point (mm) that LE and cf_at_peak refer to; D and G are
+    evaluated at the same point so every factor describes ONE prediction. None = global argmax.
+    center_xy: array/shell centre (mm) for CC and G."""
     mask = extract_breast_mask(image)
-    dominance = calculate_peak_dominance(image, mask)
-    risk = calculate_boundary_artifact_risk(image, mask)
-    
+    peak_coords = None
+    if peak_xy is not None and axis_mm is not None:
+        peak_coords = (int(np.argmin(np.abs(axis_mm - peak_xy[1]))),
+                       int(np.argmin(np.abs(axis_mm - peak_xy[0]))))
+    dominance = calculate_peak_dominance(image, mask, peak_coords)
+
+    # FIX Issue 2: central concentration menggantikan boundary_risk
+    cc = calculate_central_concentration(image, mask, axis_mm, center_xy)
+
+    # FIX Issue 3: saturation 20mm, linear ramp
+    geo = calculate_geometric_plausibility(image, axis_mm, saturation_radius_mm, peak_xy, center_xy)
+
+    # FIX Issue 4: normalized CF dengan floor 0.1
+    cf_factor = 1.0
+    if cf_at_peak is not None and not np.isnan(cf_at_peak):
+        cf_normalized = (float(cf_at_peak) - 0.1) / 0.7
+        cf_factor = float(np.clip(cf_normalized, 0.1, 1.0))
+
     norm_dominance = min(1.0, dominance / 5.0)
-    reliability = float(norm_dominance * (1.0 - risk))
-    
+    reliability = float(norm_dominance * (1.0 - cc) * geo * cf_factor)
+
     return {
         "peak_dominance": float(dominance),
-        "boundary_risk": float(risk),
+        "central_concentration": float(cc),
+        "geo_plausibility": float(geo),
+        "cf_at_peak": float(cf_at_peak) if cf_at_peak is not None else float("nan"),
+        "cf_factor": float(cf_factor),
         "reliability_score": reliability
     }

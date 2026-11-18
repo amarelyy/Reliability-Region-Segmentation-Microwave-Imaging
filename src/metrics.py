@@ -25,25 +25,28 @@ def compute_iou_dice(tumor_mask, grid_x_mm, grid_y_mm, gt_x_mm, gt_y_mm, gt_r_mm
     return float(iou), float(dice)
 
 
-def compute_scr_cnr(img, tumor_mask):
-    """SCR (dB), SMR (dB), CNR — signal region = tumor_mask, clutter = rest."""
+def compute_scr_cnr(img, tumor_mask, region=None):
+    """SCR (dB), SMR (dB), CNR — signal region = tumor_mask, clutter = rest of `region`
+    (whole image if region is None)."""
+    region = np.ones_like(tumor_mask, dtype=bool) if region is None else region
+    clutter = region & ~tumor_mask
     signal_power = img[tumor_mask].mean() if tumor_mask.sum() > 0 else 0.0
-    clutter_power = img[~tumor_mask].mean()
-    clutter_std = img[~tumor_mask].std()
+    clutter_power = img[clutter].mean()
+    clutter_std = img[clutter].std()
 
     scr_db = 10 * np.log10(signal_power / (clutter_power + 1e-12)) if signal_power > 0 else 0.0
-    smr_db = 10 * np.log10(signal_power / (img.mean() + 1e-12)) if signal_power > 0 else 0.0
+    smr_db = 10 * np.log10(signal_power / (img[region].mean() + 1e-12)) if signal_power > 0 else 0.0
     cnr = (signal_power - clutter_power) / (clutter_std + 1e-12)
 
     return float(scr_db), float(smr_db), float(cnr)
 
 
 def compute_all_metrics(img, tumor_mask, x_axis_mm, y_axis_mm, peak_x_mm, peak_y_mm,
-                         gt_x_mm, gt_y_mm, gt_r_mm):
+                         gt_x_mm, gt_y_mm, gt_r_mm, region=None):
     grid_x_mm, grid_y_mm = np.meshgrid(x_axis_mm, y_axis_mm)
     le = compute_localization_error(peak_x_mm, peak_y_mm, gt_x_mm, gt_y_mm)
     iou, dice = compute_iou_dice(tumor_mask, grid_x_mm, grid_y_mm, gt_x_mm, gt_y_mm, gt_r_mm)
-    scr_db, smr_db, cnr = compute_scr_cnr(img, tumor_mask)
+    scr_db, smr_db, cnr = compute_scr_cnr(img, tumor_mask, region)
     return dict(localization_error_mm=le, iou=iou, dice=dice,
                 scr_db=scr_db, smr_db=smr_db, cnr=cnr)
 
