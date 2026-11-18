@@ -3,7 +3,7 @@
   "cf_power": 1.5,
   "percentile_clip": [5, 99],
   "mer_power": 2.0,
-  "gamma": 0.5,
+  "gamma": 0.7,
   "log_sigma": [3, 4, 5, 6, 7],
   "bias_alpha": 0.3,
   "grid_step_mm": 1.0,
