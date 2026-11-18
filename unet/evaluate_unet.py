@@ -1,39 +1,45 @@
 """
-rrs_mbi/evaluate_unet.py
-Evaluasi akurasi model UNet2Ch yang sudah di-train (unet_reliability.pth).
-Menghitung: Dice, IoU, Accuracy, Precision, Recall, F1
+unet/evaluate_unet.py
+
+Evaluation of the trained UNet2Ch (unet/checkpoints/unet_reliability.pth) on HELD-OUT phantoms only,
+with exactly the preprocessing used in training (MicrowaveImagingDataset: per-channel min-max,
+128x128 resize, nearest-neighbour mask). Metrics: Dice, IoU, accuracy, precision, recall, F1.
+
+The held-out phantom list is written by unet/training/train.py to unet/checkpoints/val_phantoms.npy.
+The model already ends in a Sigmoid, so its output is used as a probability (no second sigmoid).
+
+  python -m unet.evaluate_unet
 """
 
 import sys
 from pathlib import Path
-import numpy as np
-import torch
-import pandas as pd
-from typing import Dict, List, Any, Tuple
+from typing import Dict
 
-sys.path.append(str(Path(__file__).resolve().parent.parent))
+import numpy as np
+import pandas as pd
+import torch
+
+REPO = Path(__file__).resolve().parent.parent
+sys.path.append(str(REPO))
 
 from unet.models.unet_2ch import UNet2Ch
 from src.data_loading import load_all_data
-from src.pipeline import reconstruct_scan
-
 
 # ==============================================================================
-# KONFIGURASI
+# CONFIG
 # ==============================================================================
-MODEL_PATH = "unet/checkpoints/unet_reliability.pth"  # Sesuaikan path jika berbeda
+MODEL_PATH = str(REPO / "unet" / "checkpoints" / "unet_reliability.pth")
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-BATCH_SIZE = 4
-THRESHOLD = 0.5  # Threshold untuk konversi probabilitas → binary mask
+THRESHOLD = 0.5  # probability -> binary mask
 
 
 # ==============================================================================
-# METRIK EVALUASI
+# METRICS
 # ==============================================================================
 def compute_metrics(pred_mask: np.ndarray, gt_mask: np.ndarray) -> Dict[str, float]:
     """
-    Menghitung metrik segmentasi biner.
-    pred_mask & gt_mask: numpy array 2D dengan nilai 0 atau 1.
+    Binary segmentation metrics.
+    pred_mask & gt_mask: 2D numpy arrays with values 0 or 1.
     """
     pred = pred_mask.astype(bool)
     gt = gt_mask.astype(bool)
@@ -60,185 +66,32 @@ def compute_metrics(pred_mask: np.ndarray, gt_mask: np.ndarray) -> Dict[str, flo
     }
 
 
-def create_gt_mask(img_shape: Tuple[int, int], gt_x_mm: float, gt_y_mm: float,
-                   gt_r_mm: float, axis_mm: np.ndarray) -> np.ndarray:
-    """
-    Membuat ground truth binary mask dari koordinat dan radius tumor (dalam mm).
-    Mengonversi koordinat mm ke pixel index berdasarkan axis_mm.
-    """
-    if np.isnan(gt_x_mm) or np.isnan(gt_y_mm) or np.isnan(gt_r_mm):
-        return np.zeros(img_shape, dtype=np.float32)
-
-    # Cari index pixel terdekat dari koordinat mm
-    ix = int(np.argmin(np.abs(axis_mm - gt_x_mm)))
-    iy = int(np.argmin(np.abs(axis_mm - gt_y_mm)))
-
-    # Hitung radius dalam pixel
-    pixel_size_mm = abs(axis_mm[1] - axis_mm[0]) if len(axis_mm) > 1 else 1.0
-    r_px = gt_r_mm / pixel_size_mm
-
-    # Buat circular mask
-    y_grid, x_grid = np.ogrid[:img_shape[0], :img_shape[1]]
-    mask = ((x_grid - ix) ** 2 + (y_grid - iy) ** 2) <= r_px ** 2
-    return mask.astype(np.float32)
-
-
 # ==============================================================================
-# FUNGSI UTAMA EVALUASI
+# EVALUATION
 # ==============================================================================
-@torch.no_grad()
-def evaluate_unet() -> pd.DataFrame:
-    print("=" * 70)
-    print("UNET ACCURACY EVALUATION")
-    print("=" * 70)
-
-    # 1. Load Model
-    print(f"\nLoading model from: {MODEL_PATH}")
-    print(f"Device: {DEVICE}")
-
-    if not Path(MODEL_PATH).exists():
-        raise FileNotFoundError(
-            f"Model file not found: {MODEL_PATH}\n"
-            f"Pastikan path benar. Cek folder unet/checkpoints/"
-        )
-
-    model = UNet2Ch(n_channels=2, n_classes=1).to(DEVICE)
-    model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
-    model.eval()
-    print("✅ Model loaded successfully.")
-
-    # 2. Load Data
-    print("\nLoading dataset...")
-    data = load_all_data()  # type: ignore
-    s21 = data["s21"]
-    tumor_model = data["tumor_model"]
-    id_to_original_idx = data["id_to_original_idx"]
-
-    total_scans = len(tumor_model)
-    print(f"Total scans: {total_scans}")
-
-    # 3. Evaluasi Loop
-    results: List[Dict[str, Any]] = []
-    skipped = 0
-    skip_log: List[Dict[str, Any]] = []  # every skipped scan + reason (nothing is dropped silently)
-
-    print(f"\nEvaluating {total_scans} scans...")
-    for i in range(total_scans):
-        if i % 50 == 0:
-            print(f"  Processing scan {i + 1}/{total_scans}...")
-
-        try:
-            # Reconstruct dengan diagnostics untuk mendapatkan gambar + axis_mm
-            res = reconstruct_scan(
-                i, s21, tumor_model, id_to_original_idx,
-                return_diagnostics=True
-            )  # type: ignore
-
-            img = res["diagnostics"]["image"]
-            axis_mm = res["diagnostics"]["axis_mm"]
-
-            # Siapkan input untuk U-Net (2 channel: image + image/CF map)
-            # Sesuaikan ini dengan cara training kamu menyiapkan input!
-            # Asumsi: channel 1 = reconstructed image, channel 2 = CF map atau duplicate
-            cf_map = res["diagnostics"].get("cf_map", None)
-            if cf_map is not None:
-                input_tensor = np.stack([img, cf_map], axis=0)  # Shape: (2, H, W)
-            else:
-                input_tensor = np.stack([img, img], axis=0)  # Fallback: duplicate
-
-            # Normalize ke [0, 1]
-            input_min = input_tensor.min()
-            input_max = input_tensor.max()
-            if input_max - input_min > 1e-8:
-                input_tensor = (input_tensor - input_min) / (input_max - input_min)
-            else:
-                input_tensor = np.zeros_like(input_tensor)
-
-            # Inference
-            x = torch.from_numpy(input_tensor).unsqueeze(0).float().to(DEVICE)  # (1, 2, H, W)
-            output = model(x)  # (1, 1, H, W)
-            pred_prob = output.squeeze().cpu().numpy()  # model already ends in Sigmoid
-            pred_mask = (pred_prob > THRESHOLD).astype(np.float32)
-
-            # Buat Ground Truth Mask
-            gt_x = float(res.get("gt_x_mm", np.nan))
-            gt_y = float(res.get("gt_y_mm", np.nan))
-            gt_r = float(res.get("gt_r_mm", np.nan))
-            gt_mask = create_gt_mask(img.shape, gt_x, gt_y, gt_r, axis_mm)
-
-            # Skip jika tidak ada tumor (healthy scan)
-            if gt_mask.sum() == 0:
-                skipped += 1
-                skip_log.append({"scan_idx": i, "reason": "empty ground-truth mask"})
-                continue
-
-            # Hitung Metrik
-            metrics = compute_metrics(pred_mask, gt_mask)
-
-            scan_id = res.get("phant_id", tumor_model.iloc[i].get("id", i))
-            results.append({
-                "scan_id": str(scan_id),
-                "scan_idx": i,
-                "gt_x_mm": gt_x,
-                "gt_y_mm": gt_y,
-                "gt_r_mm": gt_r,
-                **metrics,
-            })
-
-        except Exception as e:
-            skipped += 1
-            skip_log.append({"scan_idx": i, "reason": repr(e)[:200]})
-            print(f"  SKIPPED scan {i}: {e!r}")
-            continue
-
-    # 4. Summary
-    df = pd.DataFrame(results)
-
-    print(f"\n{'=' * 70}")
-    print(f"EVALUATION COMPLETE")
-    print(f"{'=' * 70}")
-    print(f"Scans evaluated: {len(df)}")
-    print(f"Scans skipped (no tumor / error): {skipped}")
-    if skip_log:
-        pd.DataFrame(skip_log).to_csv("rrs_mbi/results/unet_evaluation_skipped.csv", index=False)
-    print(f"{'=' * 70}")
-
-    if not df.empty:
-        metric_cols = ["dice", "iou", "accuracy", "precision", "recall", "f1"]
-        print(f"\n{'Metric':<15} {'Mean':>10} {'Std':>10} {'Min':>10} {'Max':>10}")
-        print("-" * 60)
-        for col in metric_cols:
-            vals = df[col]
-            print(f"{col:<15} {vals.mean():>10.4f} {vals.std():>10.4f} "
-                  f"{vals.min():>10.4f} {vals.max():>10.4f}")
-        print("-" * 60)
-
-        # Save CSV
-        out_path = Path("rrs_mbi/results/unet_evaluation.csv")
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        df.to_csv(out_path, index=False)
-        print(f"\n✅ Results saved to: {out_path}")
-    else:
-        print("\n⚠️ No valid results. Check model path and data loading.")
-
-    return df
-
-
-
-
 @torch.no_grad()
 def evaluate_unet_heldout() -> pd.DataFrame:
-    """Evaluate on held-out phantoms only, with EXACTLY the training preprocessing
-    (per-channel min-max, 128x128 resize, nearest-neighbour mask)."""
+    """Evaluate on held-out phantoms only, with EXACTLY the training preprocessing."""
     from unet.dataset.microwave_dataset import MicrowaveImagingDataset
+
+    model_path = Path(MODEL_PATH)
+    val_path = model_path.parent / "val_phantoms.npy"
+    for p in (model_path, val_path):
+        if not p.exists():
+            raise FileNotFoundError(f"{p} not found. Train first: python -m unet.training.train")
+
     model = UNet2Ch(n_channels=2, n_classes=1).to(DEVICE)
-    model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
+    model.load_state_dict(torch.load(model_path, map_location=DEVICE, weights_only=True))
     model.eval()
+
     data = load_all_data()
     tm = data["tumor_model"]
-    val_phantoms = np.load(Path(MODEL_PATH).parent / "val_phantoms.npy", allow_pickle=True)
+    val_phantoms = np.load(val_path, allow_pickle=True)
     tm_val = tm[tm["phant_id"].isin(val_phantoms)].reset_index(drop=True)
+    print(f"Held-out: {len(tm_val)} scans from {tm_val['phant_id'].nunique()} phantoms")
+
     ds = MicrowaveImagingDataset(data["s21"], tm_val, data["id_to_original_idx"], data["freq_axis"])
+    ds.prepare()
     rows = []
     for i in range(len(ds)):
         x, y = ds[i]
@@ -246,7 +99,7 @@ def evaluate_unet_heldout() -> pd.DataFrame:
         m = compute_metrics((prob > THRESHOLD).astype(np.float32), y.squeeze().numpy())
         rows.append({"phant_id": tm_val.at[i, "phant_id"], **m})
     df = pd.DataFrame(rows)
-    print(df[["dice", "precision", "recall"]].describe().loc[["mean", "std"]])
+    print(df[["dice", "iou", "precision", "recall"]].describe().loc[["mean", "std"]])
     return df
 
 

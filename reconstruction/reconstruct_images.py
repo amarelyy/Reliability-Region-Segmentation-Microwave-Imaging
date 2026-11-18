@@ -202,12 +202,6 @@ def build_tables(df):
     A.index.name = "Localisation error (mm)"
     parts += [md(A.rename(columns={"det10": "det@10 (%)", "det15": "det@15 (%)", "det20": "det@20 (%)"})), ""]
 
-    fn = lambda t: float((t["LE"] - t["LE_trivial"]).mean())
-    bs = cluster_bootstrap(d, fn, n_boot=2000)
-    parts += ["Paired mean LE difference, pipeline peak - centre guess (phantom-cluster bootstrap 95%% CI; "
-              "negative = imaging better): %+.2f mm [%+.2f, %+.2f]; pipeline better in %.1f%% of scans." %
-              (fn(d), *np.percentile(bs, [2.5, 97.5]), (df["LE"] < df["LE_trivial"]).mean() * 100), ""]
-
     spec = [("SCR (dB)", "scr_db"), ("SMR (dB)", "smr_db"), ("CNR", "cnr"), ("Dice", "dice"), ("IoU", "iou"),
             ("Blob area (px, 1 mm/px)", "blob_area_px"), ("Size error (mm)", "size_err_mm"),
             ("CF at peak", "cf_at_peak"), ("Peak distance from centre (mm)", "peak_dist_from_centre"),
@@ -215,26 +209,44 @@ def build_tables(df):
             ("Peak margin (cleanliness, 1 = clean)", "peak_margin")]
     B = {nm: {k: v for k, v in describe(df[key]).items() if k in ("mean", "median", "min", "max", "sd")}
          for nm, key in spec}
-    B["GT inside blob (% scans)"] = dict(mean=df["gt_in_blob"].mean() * 100)
-    B["Size error <= 5 mm (% scans)"] = dict(mean=(df["size_err_mm"] <= 5).mean() * 100)
     Bdf = pd.DataFrame(B).T[["mean", "median", "min", "max", "sd"]]
-    Bdf.index.name = "Metric"
-    parts += [md(Bdf, "%.3f"), ""]
+    Bdf.index.name = "Image quality and segmentation (pipeline blob)"
+    parts += [md(Bdf), ""]
+    rates = pd.DataFrame({"GT inside blob (% scans)": [df["gt_in_blob"].mean() * 100],
+                          "Size error <= 5 mm (% scans)": [(df["size_err_mm"] <= 5).mean() * 100],
+                          "Dice = 0 (% scans)": [(df["dice"] == 0).mean() * 100]}, index=["pipeline blob"])
+    rates.index.name = "Blob"
+    parts += [md(rates), ""]
+
+    fn = lambda t: float((t["LE"] - t["LE_trivial"]).mean())
+    bs = cluster_bootstrap(d, fn, n_boot=2000)
+    P = pd.DataFrame({"Difference (mm)": ["%+.2f" % fn(d)],
+                      "95% CI (phantom-cluster bootstrap)": ["[%+.2f, %+.2f]" % tuple(np.percentile(bs, [2.5, 97.5]))],
+                      "Pipeline better (% scans)": [(df["LE"] < df["LE_trivial"]).mean() * 100]},
+                     index=["pipeline - centre guess"])
+    P.index.name = "Paired mean LE"
+    parts += [md(P), "Positive means the pipeline is worse than the centre guess on average.", ""]
 
     def grp(g):
-        return pd.DataFrame(dict(n=g.size(), LE=g["LE"].mean(), LE_centre_guess=g["LE_trivial"].mean(),
-                                 det15=g["LE"].apply(lambda v: (v <= 15).mean() * 100),
-                                 dice=g["dice"].mean(), scr_db=g["scr_db"].mean()))
+        return pd.DataFrame({"n": g.size(), "mean LE (mm)": g["LE"].mean(),
+                             "mean centre-guess LE (mm)": g["LE_trivial"].mean(),
+                             "det@15 (%)": g["LE"].apply(lambda v: (v <= 15).mean() * 100),
+                             "mean Dice": g["dice"].mean(), "mean IoU": g["iou"].mean(),
+                             "mean SCR (dB)": g["scr_db"].mean(), "mean SMR (dB)": g["smr_db"].mean()})
     C1 = grp(df.groupby("tumour_r_mm"))
+    C1.index = C1.index.astype(int)
     C2 = grp(df.groupby(pd.cut(df["gt_dist_from_centre"], [-0.1, 10, 20, 30, 40, 200],
                                labels=["0-10", "10-20", "20-30", "30-40", ">40"]), observed=True))
     C1.index.name, C2.index.name = "Tumour radius (mm)", "True distance from centre (mm)"
-    parts += [md(C1), "", md(C2), ""]
-    tabs = dict(A=A, B=Bdf, C1=C1, C2=C2)
-    if df["birads"].notna().any():
-        C3 = grp(df.groupby("birads"))
+    parts += [md(C2), "", md(C1), ""]
+    tabs = dict(A=A, B=Bdf, R=rates, P=P, C2=C2, C1=C1)
+    has_birads = df["birads"].notna()
+    if has_birads.any():
+        C3 = grp(df[has_birads].groupby("birads"))
+        C3.index = C3.index.astype(int)
         C3.index.name = "BI-RADS"
-        parts += [md(C3), ""]
+        parts += [md(C3), "%d scans have no BI-RADS and are excluded (n = %d)." %
+                  ((~has_birads).sum(), has_birads.sum()), ""]
         tabs["C3"] = C3
     return "\n".join(parts), tabs
 

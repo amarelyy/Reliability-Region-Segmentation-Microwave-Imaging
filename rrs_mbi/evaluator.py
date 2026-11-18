@@ -53,9 +53,18 @@ def cluster_bootstrap(df: pd.DataFrame, stat, n_boot: int = 2000, seed: int = 42
     return np.asarray(out, dtype=np.float64)
 
 
-def top_fraction_gap(d: pd.DataFrame, frac: float) -> float:
-    """Mean LE of all scans minus mean LE of the top-`frac` scans by reliability (>0 = R helps)."""
-    n = max(1, int(len(d) * frac))
+def top_k_count(n_total: int, frac: float | None = None, k: int | None = None) -> int:
+    """Number of scans in a 'top' subset: an exact count `k`, or floor(n_total * frac).
+    The epsilon keeps float products such as 161 * (50 / 161) = 49.999... from losing a scan."""
+    if k is not None:
+        return int(max(1, min(k, n_total)))
+    return int(max(1, np.floor(n_total * frac + 1e-9)))
+
+
+def top_fraction_gap(d: pd.DataFrame, frac: float | None = None, k: int | None = None) -> float:
+    """Mean LE of all scans minus mean LE of the top scans by reliability (>0 = R helps).
+    Give either `frac` (top fraction) or `k` (exact number of scans)."""
+    n = top_k_count(len(d), frac, k)
     return float(d["localization_error"].mean() - d.nlargest(n, "reliability_score")["localization_error"].mean())
 
 
@@ -234,7 +243,7 @@ def analyze_thresholds(df: pd.DataFrame, num_thresholds: int = 10) -> pd.DataFra
     rows: list[dict[str, Any]] = []
 
     for ratio in np.linspace(1.0, 0.1, num_thresholds):
-        n_keep = max(1, int(total * ratio))
+        n_keep = top_k_count(total, ratio)
         subset = df_sorted.iloc[:n_keep]
 
         errs = subset["localization_error"].dropna().to_numpy(dtype=np.float64)
@@ -243,7 +252,7 @@ def analyze_thresholds(df: pd.DataFrame, num_thresholds: int = 10) -> pd.DataFra
 
         # Phantom-cluster bootstrap with re-selection of the top-`ratio` scans in each resample
         boots = cluster_bootstrap(
-            df, lambda d, r=ratio: float(d.nlargest(max(1, int(len(d) * r)), "reliability_score")["localization_error"].mean()),
+            df, lambda d, r=ratio: float(d.nlargest(top_k_count(len(d), r), "reliability_score")["localization_error"].mean()),
             n_boot=1000)
         ci_lo, ci_hi = float(np.percentile(boots, 2.5)), float(np.percentile(boots, 97.5))
 
@@ -518,11 +527,11 @@ def main() -> None:
         "spearman_R_vs_LE": lambda d: float(_spearman(d["reliability_score"], d["localization_error"])[0]),
         "gap_top10pct_mm": lambda d: top_fraction_gap(d, 0.10),
         "gap_top20pct_mm": lambda d: top_fraction_gap(d, 0.20),
-        "gap_top50scans_mm": lambda d: top_fraction_gap(d, 50 / len(d)),
+        "gap_top50scans_mm": lambda d: top_fraction_gap(d, k=50),
         "det_high_minus_low_tier": _tier_det_diff,
         "top10pct_LE_minus_trivial_mm": lambda d: float(
             (lambda s: s["localization_error"].mean() - s["trivial_center_error"].mean())(
-                d.nlargest(max(1, int(len(d) * 0.10)), "reliability_score"))),
+                d.nlargest(top_k_count(len(d), 0.10), "reliability_score"))),
     }
     rows = []
     print(f"\n--- Cluster-robust inference (phantom bootstrap, 2000x) ---")

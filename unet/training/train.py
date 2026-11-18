@@ -61,21 +61,27 @@ def main():
     tumor_model = d["tumor_model"]
     id_to_original_idx = d["id_to_original_idx"]
     
-    # Define freq_axis for bandpass
-    freq_axis = np.linspace(1e9, 8e9, 1001)
+    # Frequency axis from the data loader (sized from the S21 array), not hard-coded
+    freq_axis = d["freq_axis"]
+    ckpt_dir = Path(__file__).resolve().parent.parent / "checkpoints"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     # Split data (Simple 80/20 split for now)
     # Split BY PHANTOM so no phantom appears in both sets (scans of one phantom are not independent)
     from sklearn.model_selection import GroupShuffleSplit
     gss = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
     train_indices, val_indices = next(gss.split(tumor_model, groups=tumor_model["phant_id"]))
-    np.save(Path(__file__).resolve().parent.parent / "checkpoints" / "val_phantoms.npy",
-            tumor_model["phant_id"].iloc[val_indices].unique())
+    np.save(ckpt_dir / "val_phantoms.npy", tumor_model["phant_id"].iloc[val_indices].unique())
 
     train_dataset = MicrowaveImagingDataset(s21, tumor_model.iloc[train_indices].reset_index(drop=True), 
                                             id_to_original_idx, freq_axis)
     val_dataset = MicrowaveImagingDataset(s21, tumor_model.iloc[val_indices].reset_index(drop=True), 
                                           id_to_original_idx, freq_axis)
+
+    # Reconstruct every scan once (phantom order, delay-grid cache hits); epochs then reuse the cache
+    print("Preparing inputs (one reconstruction per scan)...")
+    train_dataset.prepare()
+    val_dataset.prepare()
 
     train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False)
@@ -96,8 +102,7 @@ def main():
         print(f"Epoch [{epoch+1}/{epochs}] - Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
 
     # 5. Save Model
-    save_path = Path(__file__).resolve().parent.parent / "checkpoints" / "unet_reliability.pth"
-    save_path.parent.mkdir(exist_ok=True)
+    save_path = ckpt_dir / "unet_reliability.pth"
     torch.save(model.state_dict(), save_path)
     print(f"Model saved to {save_path}")
 

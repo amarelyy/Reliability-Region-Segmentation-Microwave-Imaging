@@ -1,5 +1,6 @@
 """U-Net 5-fold GroupKFold (grouped by phantom id) on cached REAL inputs.
-Inputs : results_audit/final/cache/unet_inputs_final.npz (read only; built by results_audit/unet_final.py)
+Inputs : results_unet_fixed/cache/unet_inputs.npz. Built on the first run with MicrowaveImagingDataset
+         (same preprocessing as unet/training/train.py), then reused.
 Outputs: results_unet_fixed/ only.  Fixed settings, nothing tuned on held-out folds.
 """
 import json, subprocess, sys, time
@@ -18,18 +19,45 @@ import unet.evaluate_unet as ev
 OUT = REPO / "results_unet_fixed"
 CFG = dict(seed=42, n_splits=5, epochs=20, batch_size=4, lr=1e-3, loss="0.5*BCE+0.5*Dice (CombinedLoss)",
            threshold=ev.THRESHOLD, checkpoint_selection="none (last epoch)", overfit_scans=8, overfit_epochs=100,
-           inputs="results_audit/final/cache/unet_inputs_final.npz")
+           inputs="results_unet_fixed/cache/unet_inputs.npz")
 dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 git = lambda *a: subprocess.run(["git", *a], cwd=REPO, capture_output=True, text=True).stdout.strip()
 CFG.update(git_commit=git("rev-parse", "HEAD"), git_branch=git("branch", "--show-current"),
            git_dirty_files=git("status", "--short"), device=str(dev), torch=torch.__version__)
 (OUT / "config.json").write_text(json.dumps(CFG, indent=2))
 
+def load_or_build_inputs(path, d, limit=None):
+    """Load the cached (X, Y, ok) arrays, or build them once with MicrowaveImagingDataset (same
+    preprocessing as unet/training/train.py). Scans whose reconstruction fails get ok=False.
+    `limit` builds only the first `limit` scans in phantom order (for smoke tests)."""
+    if path.exists():
+        z = np.load(path, allow_pickle=True)
+        return z["X"], z["Y"], z["ok"]
+    from unet.dataset.microwave_dataset import MicrowaveImagingDataset
+    tm_all = d["tumor_model"].reset_index(drop=True)
+    ds = MicrowaveImagingDataset(d["s21"], tm_all, d["id_to_original_idx"], d["freq_axis"], cache=False)
+    n, s = len(tm_all), ds.target_size
+    X = np.zeros((n, 2, s, s), np.float32); Y = np.zeros((n, 1, s, s), np.float32); ok = np.zeros(n, bool)
+    order = np.argsort(tm_all["phant_id"].to_numpy(), kind="stable")   # phantom order -> delay-cache hits
+    if limit:
+        order = order[:limit]
+    for k, i in enumerate(order):
+        try:
+            x, y = ds[int(i)]
+            X[i], Y[i], ok[i] = x.numpy(), y.numpy(), True
+        except Exception as e:   # keep going; the failure is logged in skipped_scans.csv
+            print(f"  input for scan {int(i)} failed: {e!r}", flush=True)
+        if k % 50 == 0:
+            print(f"  building inputs {k + 1}/{len(order)}", flush=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(path, X=X, Y=Y, ok=ok)
+    return X, Y, ok
+
+
 d = load_all_data(); tm = d["tumor_model"].reset_index(drop=True); N = len(tm)
-z = np.load(REPO / CFG["inputs"], allow_pickle=True)
-X, Y, ok = z["X"], z["Y"], z["ok"]
+X, Y, ok = load_or_build_inputs(REPO / CFG["inputs"], d)
 assert len(X) == N
-skips = [dict(scan_idx=int(i), phant_id=tm.phant_id.iloc[i], reason="input not cached (reconstruction failed; see results_audit/final/unet/skipped_samples.csv)")
+skips = [dict(scan_idx=int(i), phant_id=tm.phant_id.iloc[i], reason="reconstruction failed while building the input cache")
          for i in np.where(~ok)[0]]
 # scans with an empty GT mask would have undefined metrics: log them too
 empty = [i for i in np.where(ok)[0] if Y[i].sum() == 0]

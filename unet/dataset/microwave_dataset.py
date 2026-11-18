@@ -21,8 +21,8 @@ from src.data_loading import load_all_data
 from src.pipeline import reconstruct_scan
 
 class MicrowaveImagingDataset(Dataset):
-    def __init__(self, s21, tumor_model, id_to_original_idx, freq_axis, 
-                 transform=None, use_cf=True, target_size=128):
+    def __init__(self, s21, tumor_model, id_to_original_idx, freq_axis,
+                 transform=None, use_cf=True, target_size=128, cache=True):
         """
         Args:
             s21: Complex S-parameter array.
@@ -32,7 +32,11 @@ class MicrowaveImagingDataset(Dataset):
             transform: Optional torchvision transforms (e.g., augmentation).
             use_cf: Whether to include Coherence Factor as 2nd channel.
             target_size: Target output size for the image/mask (e.g., 128x128).
+            cache: Keep each scan's (input, mask) tensors in memory after the first access
+                (about 0.2 MB per scan, ~100 MB for 504 scans), so shuffled epochs do not
+                repeat the full reconstruction. The cache is stored BEFORE `transform`.
         """
+        self._cache = {} if cache else None
         self.s21 = s21
         self.tumor_model = tumor_model.reset_index(drop=True)
         self.id_to_original_idx = id_to_original_idx
@@ -75,9 +79,33 @@ class MicrowaveImagingDataset(Dataset):
         
         return mask
 
+    def prepare(self):
+        """Fill the cache in phantom order (delay-grid cache hits) before shuffled training starts."""
+        if self._cache is None:
+            return
+        order = np.argsort(self.tumor_model["phant_id"].to_numpy(), kind="stable")
+        for i in order:
+            self[int(i)]
+
     def __getitem__(self, idx):
+        if self._cache is not None and idx in self._cache:
+            input_tensor, mask_tensor = self._cache[idx]
+        else:
+            input_tensor, mask_tensor = self._build(idx)
+            if self._cache is not None:
+                self._cache[idx] = (input_tensor, mask_tensor)
+
+        # always hand out copies so callers / transforms can never modify the cache
+        input_tensor, mask_tensor = input_tensor.clone(), mask_tensor.clone()
+        if self.transform:
+            input_tensor = self.transform(input_tensor)
+            mask_tensor = self.transform(mask_tensor)
+        return input_tensor, mask_tensor
+
+    def _build(self, idx):
+        """Full reconstruction + preprocessing of one scan (no transform)."""
         row = self.tumor_model.iloc[idx]
-        
+
         # 1. Run Physics Pipeline to get Image + CF
         # Note: We disable depth gain/TVSVD here to keep input raw-ish for AI to learn
         result = reconstruct_scan(
@@ -113,10 +141,5 @@ class MicrowaveImagingDataset(Dataset):
         # 5. RESIZE TO FIXED SIZE (Using correct interpolation methods)
         input_tensor = self.img_resizer(input_tensor)
         mask_tensor = self.mask_resizer(mask_tensor)
-
-        # 6. Apply optional transforms (e.g., augmentations) if provided
-        if self.transform:
-            input_tensor = self.transform(input_tensor)
-            mask_tensor = self.transform(mask_tensor)
 
         return input_tensor, mask_tensor

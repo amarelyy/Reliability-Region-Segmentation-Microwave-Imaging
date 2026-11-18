@@ -63,34 +63,44 @@ def birads_stratified_summary(results_df, birads_col="birads",
 # ============================================================================
 # Front-surface-bias diagnostic
 # ============================================================================
-def front_surface_bias_diagnostic(results_df):
-    """
-    Checks whether the predicted-minus-GT offset vector is systematically
-    aligned with the direction from the antenna array center (assumed at
-    the origin) toward the true tumor location — the signature of
-    front-surface bias (peak pulled toward the tumor's near/antenna-facing
-    edge) as opposed to unbiased random localization error.
+def _first_column(df, names):
+    for n in names:
+        if n in df.columns:
+            return n
+    raise KeyError("none of the columns %s found; available: %s" % (list(names), list(df.columns)))
 
-    Requires columns: peak_x_mm, peak_y_mm, gt_x_mm, gt_y_mm in results_df.
-    Adds a column 'radial_bias_mm': positive means the predicted peak sits
-    CLOSER to the antenna array than the true tumor center (consistent with
-    front-surface bias); negative means it overshoots past the tumor.
+
+def front_surface_bias_diagnostic(results_df, center_cols=("shell_cx_mm", "shell_cy_mm")):
+    """
+    Checks whether the predicted peak sits systematically closer to the array/shell
+    centre than the true tumour does — the signature of a pull towards the centre
+    (front-surface bias or a central artifact) as opposed to unbiased random
+    localization error.
+
+    Accepted column names (first match wins):
+      predicted peak: peak_x_mm / peak_y_mm, or pred_x_mm / pred_y_mm
+      ground truth:   gt_x_mm / gt_y_mm,     or true_x_mm / true_y_mm
+      centre:         `center_cols` (default shell_cx_mm / shell_cy_mm, the estimated shell
+                      centre the pipeline uses); falls back to the origin (0, 0) if absent.
+    Adds a column 'radial_bias_mm' = (GT distance from centre) - (peak distance from centre):
+    positive means the peak sits CLOSER to the centre than the true tumour.
 
     Returns (results_df_with_column, summary_dict) where summary_dict has
     mean/std of radial_bias_mm and a fraction-positive statistic — a value
-    consistently > 0 across most scans is evidence for front-surface bias
-    rather than random error (which would center around 0 with no
-    systematic sign).
+    consistently > 0 across most scans is evidence for a pull towards the centre
+    rather than random error (which would center around 0 with no systematic sign).
     """
     df = results_df.copy()
+    px = _first_column(df, ("peak_x_mm", "pred_x_mm"))
+    py = _first_column(df, ("peak_y_mm", "pred_y_mm"))
+    gx = _first_column(df, ("gt_x_mm", "true_x_mm"))
+    gy = _first_column(df, ("gt_y_mm", "true_y_mm"))
+    cx = df[center_cols[0]] if center_cols[0] in df.columns else 0.0
+    cy = df[center_cols[1]] if center_cols[1] in df.columns else 0.0
 
-    gt_dist_from_origin = np.sqrt(df["gt_x_mm"] ** 2 + df["gt_y_mm"] ** 2)
-    pred_dist_from_origin = np.sqrt(df["peak_x_mm"] ** 2 + df["peak_y_mm"] ** 2)
-
-    # positive = predicted peak is nearer the antenna array (radially closer
-    # to origin) than the true tumor center -> consistent with front-surface
-    # bias, where the near-side reflection dominates.
-    df["radial_bias_mm"] = gt_dist_from_origin - pred_dist_from_origin
+    gt_dist_from_center = np.sqrt((df[gx] - cx) ** 2 + (df[gy] - cy) ** 2)
+    pred_dist_from_center = np.sqrt((df[px] - cx) ** 2 + (df[py] - cy) ** 2)
+    df["radial_bias_mm"] = gt_dist_from_center - pred_dist_from_center
 
     valid = df["radial_bias_mm"].notna()
     summary = dict(

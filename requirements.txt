@@ -1,17 +1,15 @@
-# Deep Learning & GPU Support
+# Deep learning (U-Net)
 --extra-index-url https://download.pytorch.org/whl/cu121
 torch>=2.1.0
 torchvision>=0.16.0
-torchaudio>=2.1.0
 
-# Data Processing & Scientific Computing
-pandas>=2.1.0
+# Scientific computing
 numpy>=1.24.0
+pandas>=2.1.0
 scipy>=1.11.0
-
-# Image Processing & Visualization
+scikit-learn>=1.3.0
 scikit-image>=0.21.0
-matplotlib>=3.8.0
+joblib>=1.3.0
 
-# Optional: For progress bars or other utilities if needed later
-tqdm
+# Plotting
+matplotlib>=3.8.0

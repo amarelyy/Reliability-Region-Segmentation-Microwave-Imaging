@@ -9,6 +9,7 @@ data/
 *.csv
 *.pkl
 *.npy
+*.npz
 *.vcd
 
 # Virtual Environment

@@ -1,11 +1,7 @@
 {
-  "_source": "rr's tuning slides (references/image.png, references/Screenshot 2026-11-18 074731.png)",
+  "_note": "Display-only enhancement parameters: the pipeline peak and all metrics never use them. cf_power is used only with the opt-in --cf-power flag.",
   "cf_power": 1.5,
   "percentile_clip": [5, 99],
   "mer_power": 2.0,
-  "gamma": 0.7,
-  "log_sigma": [3, 4, 5, 6, 7],
-  "bias_alpha": 0.3,
-  "grid_step_mm": 1.0,
-  "gate_ns": 0.70
+  "gamma": 0.7
 }
